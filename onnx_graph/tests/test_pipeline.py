@@ -83,6 +83,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual({float(r["已知exec_time"]) for r in summary}, {20})
         self.assertEqual({r["exec_time_unit"] for r in summary}, {"us"})
         self.assertEqual({r["同组子图数"] for r in summary}, {"2"})
+        self.assertEqual({r["Relu数量"] for r in summary}, {"1"})
+        self.assertEqual({r["Sigmoid数量"] for r in summary}, {"0"})
         for path in models:
             model = onnx.load(path)
             onnx.checker.check_model(model, full_check=True)
@@ -110,6 +112,7 @@ class PipelineTests(unittest.TestCase):
                                    SLASH_COUNTS=[99], FILTERS=[[("exec_time", ">", 100)]])
         self.assertEqual(report["counts"], {"exported": 1})
         self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(self.read_summary(report)[0]["Relu数量"], "1")
 
     def test_failed_statistics_never_falls_back_to_stale_csv(self):
         self.stats.mkdir()
@@ -129,6 +132,8 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("profile", statistics)
         self.assertTrue(all(r["已知exec_time"] == r["exec_time"] == r["exec_time_unit"] == ""
                             for r in self.read_summary(report)))
+        self.assertEqual({(r["Relu数量"], r["Sigmoid数量"]) for r in self.read_summary(report)},
+                         {("1", "0"), ("0", "1")})
         for path in report["csv_files"]:
             with Path(path).open(encoding="utf-8-sig") as stream:
                 self.assertNotIn("exec_time", csv.DictReader(stream).fieldnames)
@@ -153,6 +158,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(row["exec_time"], "")
         self.assertEqual(row["时间匹配节点数"], "1")
         self.assertEqual(row["时间未匹配节点数"], "1")
+        self.assertEqual((row["Relu数量"], row["Sigmoid数量"]), ("1", "1"))
 
     def test_omc_stops_after_statistics(self):
         statistics = batch.analyze_subgraphs(self.source, [1], batch_size=1)
@@ -178,6 +184,8 @@ class PipelineTests(unittest.TestCase):
         report = self.run_main(SLASH_COUNTS=[0], PROFILE_CSV=None)
         self.assertEqual(report["counts"], {"exported": 1})
         self.assertEqual(self.read_stats()["total"]["operator_counts"], {"Relu": 1, "custom::Relu": 1})
+        row = self.read_summary(report)[0]
+        self.assertEqual((row["Relu数量"], row["custom::Relu数量"]), ("1", "1"))
 
     def test_invalid_generated_csv_selection_is_rejected(self):
         self.stats.mkdir()

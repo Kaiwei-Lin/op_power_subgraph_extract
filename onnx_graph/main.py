@@ -127,17 +127,25 @@ def _write_batch_report(report, output_dir):
                              r.get("representative_onnx", ""), r.get("similarity", ""),
                              r.get("dedup_reason", "")])
     group_sizes = Counter(r["group"] for r in report["records"] if r.get("group"))
+    operator_columns = sorted(
+        {column for r in report["records"] for column in r["statistics"] if column.endswith("数量")}
+        | {f"{op}数量" for r in report["records"] for op in r.get("operator_counts", {})})
     with summary_path.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow(["斜杠数", "分组", "子图名字", "ONNX文件", "节点数", "同组子图数",
+                         *operator_columns,
                          "已知exec_time", "exec_time", "exec_time_unit",
                          "时间匹配节点数", "时间未匹配节点数"])
         for r in report["records"]:
             if r.get("dedup_status") != "representative":
                 continue
             values = r["statistics"]
+            counts = r.get("operator_counts")
             writer.writerow([r["slash_count"], r["group"], r["prefix"], r["onnx_file"], r["node_count"],
-                             group_sizes[r["group"]], values.get("已知exec_time", ""),
+                             group_sizes[r["group"]],
+                             *[counts.get(column[:-2], 0) if counts is not None else values.get(column, "")
+                               for column in operator_columns],
+                             values.get("已知exec_time", ""),
                              values.get("exec_time", ""), values.get("exec_time_unit", ""),
                              values.get("时间匹配节点数", ""), values.get("时间未匹配节点数", "")])
 
@@ -268,6 +276,7 @@ def export_from_stats(model_path, stats_dir, output_dir, *, filters=None, repair
                 raise ValueError(f"CSV 节点数 {row['节点数']} 与 ONNX 的 {len(ids)} 不一致；请重新生成同一模型的统计")
             counts = Counter((f"{graph.nodes[i]['domain']}::{graph.nodes[i]['op_type']}"
                               if graph.nodes[i]["domain"] else graph.nodes[i]["op_type"]) for i in ids)
+            record["operator_counts"] = dict(counts)
             for column, value in row.items():
                 if column.endswith("数量") and _number(value) != counts[column[:-2]]:
                     raise ValueError(f"{column} 与 ONNX 不一致；不能把 OMC/其他模型的统计直接用于当前 ONNX")
