@@ -52,17 +52,17 @@ MODEL_PATH = PACKAGE_DIR / "models/handfree_ainr/handfree_ainr.onnx"
 HIERARCHY_SOURCE = "outputs"  # 默认按输出路径分层，保留原始 name
 REPAIR_NAMES = True  # 仅 HIERARCHY_SOURCE="name" 时生效
 NAME_ALIASES_JSON = None  # 仅 name 模式生效
-OUTPUT_DIR = MODEL_PATH.parent / "networkx/main_outputs"
+OUTPUT_DIR = MODEL_PATH.parent / "networkx" / MODEL_PATH.stem
 BATCH_FROM_STATS = True
 GENERATE_STATS = True  # 默认先生成本次统计，再筛选、导出
 STATS_DIR = MODEL_PATH.parent / "networkx" / (MODEL_PATH.stem + "_stats")
-SLASH_COUNTS = [1, 2]
+SLASH_COUNTS = [0, 1, 2, 3]
 PROFILE_CSV = MODEL_PATH.parent / "handfree_ainr_fuse_20261020_102316_op.csv"
 # PROFILE_CSV = None  # 不需要时间统计时禁用
 BATCH_SIZE = 1      # 仅用于统计估算；None 禁用未知第 0 维的 batch 假设
 INPUT_SHAPES = {}   # 仅用于统计估算；例如 {"input": [1, 3, 224, 224]}
 GE_PROTO_PATH = None  # 仅 OMC 统计可能需要配置
-FILTERS = []  # 默认不过滤，所有 CSV 中的子图均参与导出与分组
+FILTERS = [[("已知exec_time", ">", 15)]]  # 当前配置；设为 [] 可不过滤
 KEEP_REPRESENTATIVES_ONLY = True  # 分组完成后删除本次选中的非代表 ONNX
 GROUP_MODE = "exact"             # 或 "similar"
 SIMILARITY_THRESHOLD = 0.90      # 仅影响 similar 模式
@@ -89,7 +89,7 @@ hierarchy_path: oSpatialNet_freq_cmps_1/fconv1.0/Transpose
 - 控制台完整打印多输出共同层级和无法分层节点的 name、outputs、分配路径及原因；记录保存到 `output_hierarchy_issues.json`（统计目录、批量导出目录或单前缀输出目录）和主 JSON 报告。`common_output_scope` 表示已归入共同层级；其他原因表示未分层。成功检查且无此类节点时为 `[]`，没有选中子图而未加载模型时为 `null`。
 - outputs 模式不运行 name/output 对齐检查，`name_output_mismatches.json` 写为 `null`，避免保留上次名称模式的诊断。`REPAIR_NAMES` 和 `NAME_ALIASES_JSON` 在该模式下不生效。
 
-切换后设置 `GENERATE_STATS = True` 重新生成统计，并使用新的 `OUTPUT_DIR`。默认输出目录已改为 `networkx/main_outputs`。新 CSV 带有 `层级来源=outputs`；缺少该列或来源不同的旧 CSV 不可用于 outputs 导出。已有 ONNX 内容与本次提取不一致时会保留文件并报告失败，要求改用新目录，以免把旧子图与新时间统计混用。
+切换后设置 `GENERATE_STATS = True` 重新生成统计，并使用新的 `OUTPUT_DIR`。当前默认输出目录为 `networkx/<模型名>`。新 CSV 带有 `层级来源=outputs`；缺少该列或来源不同的旧 CSV 不可用于 outputs 导出。已有 ONNX 内容与本次提取不一致时会保留文件并报告失败，要求改用新目录，以免把旧子图与新时间统计混用。
 
 函数 API 为兼容已有脚本，默认仍使用 name；请显式传入 `hierarchy_source="outputs"`，统计和导出保持一致：
 
@@ -189,7 +189,7 @@ OUTPUT_DIR/
 
 ### 原来的单前缀示例
 
-将 `BATCH_FROM_STATS = False`，设置 `MODEL_PATH`、`PREFIX`、`HIERARCHY_SOURCE` 即可继续使用。示例会打印所选节点及其输入输出，保存完整图为 `full_graph.nx.pkl`，导出子图为 `subgraph.onnx`。默认保存到模型所在目录下的 `networkx/main_outputs/`；重复运行会更新这些单前缀示例产物。启用名称修复时还会保存 `rename_report.json`。
+将 `BATCH_FROM_STATS = False`，设置 `MODEL_PATH`、`PREFIX`、`HIERARCHY_SOURCE` 即可继续使用。示例会打印所选节点及其输入输出，保存完整图为 `full_graph.nx.pkl`，导出子图为 `subgraph.onnx`。默认保存到模型所在目录下的 `networkx/<模型名>/`；重复运行会更新这些单前缀示例产物。启用名称修复时还会保存 `rename_report.json`。
 
 ## 快速使用
 

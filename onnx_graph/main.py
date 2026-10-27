@@ -31,14 +31,14 @@ PREFIX = "MobilenetV3/expanded_conv_1"
 HIERARCHY_SOURCE = "outputs"  # outputs 按输出路径分层并保留原始 name；name 使用旧规则。
 REPAIR_NAMES = True  # 仅 HIERARCHY_SOURCE="name" 时生效。
 NAME_ALIASES_JSON = None  # 仅 name 模式生效；可选 PACKAGE_DIR / "name_aliases.json"。
-OUTPUT_DIR = MODEL_PATH.parent / "networkx" / ("main_outputs" if HIERARCHY_SOURCE == "outputs" else "main_example")
+OUTPUT_DIR = MODEL_PATH.parent / "networkx" / MODEL_PATH.stem
 
 # True: 统计、筛选、批量导出；False: 使用原来的 PREFIX 示例。
 BATCH_FROM_STATS = True
 GENERATE_STATS = True  # False: 跳过统计，读取 STATS_DIR 中已有的全部 stats_<数字>_slash.csv。
 STATS_DIR = MODEL_PATH.parent / "networkx" / (
     MODEL_PATH.stem + ("_omc_stats" if MODEL_PATH.suffix.lower() in (".omc", ".om") else "_stats"))
-SLASH_COUNTS = [1, 2]  # 本次统计及导出的层级；前导 / 不计数。
+SLASH_COUNTS = [0, 1, 2,  3]  # 本次统计及导出的层级；前导 / 不计数。
 PROFILE_CSV = MODEL_PATH.parent / "handfree_ainr_fuse_20261020_102316_op.csv"
 # PROFILE_CSV = None  # 不需要时间统计时设为 None。
 BATCH_SIZE = 1  # 仅用于统计估算：将输入的未知第 0 维视为 batch；None 禁用。
@@ -54,7 +54,7 @@ FILTERS = []
 # 例：exec_time > 100 us 或 节点数 > 5
 # FILTERS = [[("exec_time", ">", 100)], [("节点数", ">", 5)]]
 # 例：仅按已匹配部分的耗时筛选，允许子图的完整 exec_time 未知
-# FILTERS = [[("已知exec_time", ">", 100)]]
+FILTERS = [[("已知exec_time", ">", 15)]]
 
 # 批量导出后只保留本次分组的代表 ONNX；False 则保留全部导出模型。
 KEEP_REPRESENTATIVES_ONLY = True
