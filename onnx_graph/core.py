@@ -72,7 +72,8 @@ def _output_hierarchy(outputs):
     if not names:
         return (), "missing_outputs"
     if not any("/" in t for t in names):
-        return (), "no_output_path"
+        # 平面输出属于 slash=0；多输出节点用首个非空输出标识，只计一次。
+        return (_tensor_stem(names[0]) or names[0],), ""
     paths = {tuple(p for p in _tensor_stem(t).split("/") if p) for t in names}
     common = []
     for components in zip(*paths):

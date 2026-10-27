@@ -88,7 +88,7 @@ class OutputHierarchyTests(unittest.TestCase):
         pairs = [(["/root/block/Split_output_0", "/root/block/Split_output_1"], ""),
                  (["/root/block/a", "/root/block/b"], "common_output_scope"),
                  (["/one/a", "/two/b"], "conflicting_output_paths"),
-                 (["flat_tensor"], "no_output_path"), ([], "missing_outputs"),
+                 (["flat_tensor"], ""), ([], "missing_outputs"),
                  (["/root/mixed/a", "flat"], "conflicting_output_paths")]
         model = h.make_model(h.make_graph([
             h.make_node("Identity", ["x"], outputs, name=f"name/fallback/{i}")
@@ -103,8 +103,9 @@ class OutputHierarchyTests(unittest.TestCase):
                          [reason for _, reason in pairs if reason])
         report = stats.analyze_subgraphs(model, [1, 2], hierarchy_source="outputs")
         self.assertEqual(report["levels"][0]["grouped_node_count"], 2)
-        self.assertEqual(report["levels"][0]["unscoped_node_ids"], [2, 3, 4, 5])
-        self.assertEqual(report["levels"][1]["shallower_node_ids"], [1])
+        self.assertEqual(report["levels"][0]["unscoped_node_ids"], [2, 4, 5])
+        self.assertEqual(report["levels"][0]["shallower_node_ids"], [3])
+        self.assertEqual(report["levels"][1]["shallower_node_ids"], [1, 3])
         stats.write_reports(report, self.root / "issues")
         printed = stats.format_report(report)
         for issue in report["output_hierarchy_issues"]:
@@ -112,6 +113,49 @@ class OutputHierarchyTests(unittest.TestCase):
             self.assertIn(json.dumps(issue["outputs"]), printed)
         self.assertEqual(json.loads((self.root / "issues/output_hierarchy_issues.json").read_text(encoding="utf-8")),
                          report["output_hierarchy_issues"])
+
+    def test_flat_outputs_group_at_slash_zero_and_export_with_original_name_and_time(self):
+        inputs = [h.make_tensor_value_info("x", T.FLOAT, [1, 2])]
+        nodes = [h.make_node("Relu", ["x"], ["plain_output_0"], name="original_Relu"),
+                 h.make_node("Dropout", ["plain_output_0"], ["value", "mask"], name="original_Dropout"),
+                 h.make_node("Identity", ["value"], ["_output_0"], name="original_Identity")]
+        outputs = [h.make_tensor_value_info("value", T.FLOAT, [1, 2]),
+                   h.make_tensor_value_info("mask", T.BOOL, [1, 2]),
+                   h.make_tensor_value_info("_output_0", T.FLOAT, [1, 2])]
+        model = h.make_model(h.make_graph(nodes, "flat", inputs, outputs),
+                             opset_imports=[h.make_opsetid("", 13)], ir_version=8)
+        onnx.save(model, self.source)
+        with self.profile.open("w", encoding="utf-8-sig", newline="") as stream:
+            csv.writer(stream).writerows([["op name", "total time(us)"],
+                                         ["original_Relu", 10], ["original_Relu", 30],
+                                         ["original_Dropout", 5], ["original_Identity", 2]])
+        report = stats.analyze_subgraphs(model, [0, 1, 2], hierarchy_source="outputs",
+                                         profile_csv=self.profile)
+        self.assertEqual(report["output_hierarchy_issues"], [])
+        zero, one, two = report["levels"]
+        groups = {g["prefix"]: g for g in zero["subgraphs"]}
+        self.assertEqual(set(groups), {"plain", "value", "_output_0"})
+        self.assertEqual(groups["plain"]["exec_time"], 20)
+        self.assertEqual(groups["value"]["node_ids"], [1])
+        self.assertEqual(zero["grouped_node_count"], 3)
+        for level in (one, two):
+            self.assertEqual(level["subgraphs"], [])
+            self.assertEqual(level["shallower_node_ids"], [0, 1, 2])
+        directory = self.root / "flat_stats"
+        stats.write_reports(report, directory)
+        with redirect_stdout(StringIO()):
+            result = batch.export_from_stats(self.source, directory, self.root / "flat_onnx",
+                                             hierarchy_source="outputs")
+        self.assertEqual(result["counts"], {"exported": 3})
+        for record in result["records"]:
+            self.assertEqual(record["slash_count"], 0)
+            exported = onnx.load(record["onnx_file"])
+            onnx.checker.check_model(exported, full_check=True)
+            self.assertEqual(len(exported.graph.node), 1)
+            expected = nodes[groups[record["prefix"]]["node_ids"][0]]
+            self.assertEqual(exported.graph.node[0].SerializeToString(), expected.SerializeToString())
+        dropout = next(r for r in result["records"] if r["prefix"] == "value")
+        self.assertEqual(dropout["outputs"], ["value", "mask"])
 
     def test_time_uses_original_names_and_means_not_output_paths_or_aliases(self):
         report = self.analyze()
