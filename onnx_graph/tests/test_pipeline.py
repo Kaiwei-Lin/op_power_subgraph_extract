@@ -91,6 +91,36 @@ class PipelineTests(unittest.TestCase):
             self.assertIn("/root/", model.graph.node[0].name)
         self.assertEqual(self.source.read_bytes(), original)
 
+    def test_dotted_names_flow_through_statistics_profile_export_and_summary(self):
+        outputs = [f"/layers.{i}/Reshape_1_output_0" for i in range(2)]
+        model = h.make_model(h.make_graph([
+            h.make_node("Reshape", ["x", "shape"], [output], name=f"layers_{i}_Reshape_1")
+            for i, output in enumerate(outputs)
+        ], "dotted", [h.make_tensor_value_info("x", T.FLOAT, [1, 2])], [
+            h.make_tensor_value_info(output, T.FLOAT, [1, 2]) for output in outputs
+        ], [h.make_tensor("shape", T.INT64, [2], [1, 2])]),
+            opset_imports=[h.make_opsetid("", 13)], ir_version=8)
+        onnx.save(model, self.source)
+        original = self.source.read_bytes()
+        with self.profile.open("w", encoding="utf-8-sig", newline="") as stream:
+            csv.writer(stream).writerows([
+                ["op name", "total time(us)"],
+                ["layers.0_Reshape_1", 10], ["layers.0_Reshape_1", 30],
+                ["layers.1_Reshape_1", 40], ["layers.1_Reshape_1", 60],
+            ])
+        report = self.run_main(SLASH_COUNTS=[0, 1])
+        self.assertEqual(report["counts"], {"exported": 2, "deduplicated": 2})
+        summary = self.read_summary(report)
+        self.assertEqual({r["子图名字"] for r in summary}, {"layers.0", "layers.0/Reshape_1"})
+        for row in summary:
+            self.assertEqual(row["Reshape数量"], "1")
+            self.assertEqual(float(row["已知exec_time"]), 20)
+            exported = onnx.load(row["ONNX文件"])
+            onnx.checker.check_model(exported, full_check=True)
+            self.assertEqual(exported.graph.node[0].name, "/layers.0/Reshape_1")
+            self.assertEqual(list(exported.graph.node[0].output), [outputs[0]])
+        self.assertEqual(self.source.read_bytes(), original)
+
     def test_only_fresh_csv_files_are_consumed(self):
         self.stats.mkdir()
         stale = [self.stats / f"stats_{depth}_slash.csv" for depth in ("2", "3", "01")]

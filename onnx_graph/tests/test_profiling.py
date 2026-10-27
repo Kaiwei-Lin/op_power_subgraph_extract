@@ -104,8 +104,23 @@ class ProfilingTests(unittest.TestCase):
                 self.assertEqual(report["total"]["exec_time"], 4.)
                 self.assertEqual(report["total"]["arithmetic_intensity"], 1.)
 
+    def test_dotted_paths_match_profile_with_or_without_name_repair(self):
+        original, repaired = "layers_0_Relu_1", "/layers.0/Relu_1"
+        output = repaired + "_output_0"
+        m = model([h.make_node("Relu", ["x"], [output], name=original)],
+                  [vi("x", [1, 4])], [vi(output, [1, 4])])
+        for repair in (False, True):
+            for runtime in (original, repaired, "layers.0_Relu_1", "layers*0*Relu_1"):
+                with self.subTest(repair=repair, runtime=runtime):
+                    path = self.profile([[runtime + "(Activation)", 4], [runtime + "(Activation)", 8]])
+                    report = stats.analyze_subgraphs(m, repair_names=repair, profile_csv=path)
+                    self.assertEqual(report["nodes"][0]["name"], repaired if repair else original)
+                    self.assertEqual(report["total"]["exec_time"], 6)
+                    self.assertEqual(report["nodes"][0]["exec_time_samples"], 2)
+
     def test_ambiguous_flattened_and_duplicate_names_are_not_distributed(self):
         for names, runtime in [(["root/a_b/Relu", "root/a/b_Relu"], "root*a*b*Relu(Activation)"),
+                               (["/layers.0/Relu", "/layers_0/Relu"], "layers*0*Relu(Activation)"),
                                (["root/duplicate", "root/duplicate"], "root/duplicate")]:
             with self.subTest(names=names):
                 m = model([h.make_node("Relu", ["x"], ["a"], name=names[0]),

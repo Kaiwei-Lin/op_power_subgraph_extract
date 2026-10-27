@@ -14,7 +14,7 @@ from onnx import AttributeProto, ModelProto, NodeProto, ValueInfoProto, helper
 
 
 def _flat(name: str) -> str:
-    return name.strip("/*").replace("/", "_").replace("*", "_")
+    return name.strip("/*").replace("/", "_").replace("*", "_").replace(".", "_")
 
 
 def _tensor_stem(name: str) -> str:

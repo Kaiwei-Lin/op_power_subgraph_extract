@@ -294,6 +294,38 @@ class NameRepairTests(unittest.TestCase):
                 self.assertEqual(fixed, "/mono_model/cfb_d3/LN2/Reshape")
                 self.assertEqual(record["status"], "renamed")
 
+    def test_dotted_output_scope_preserves_dots_and_underscores(self):
+        for name, expected in [
+            ("layers_0_Reshape_1", "/layers.0/Reshape_1"),
+            ("layers*0*Reshape_1", "/layers.0/Reshape_1"),
+            ("layers.0_Reshape_1", "/layers.0/Reshape_1"),
+            ("layers_0_cfb_d3_Reshape_1", "/layers.0/cfb_d3/Reshape_1"),
+        ]:
+            with self.subTest(name=name):
+                fixed, record = self.repair(name, [expected + "_output_0"])
+                self.assertEqual(fixed, expected)
+                self.assertEqual((record["status"], record["source"]), ("renamed", "output"))
+
+    def test_dotted_input_scope_fallback(self):
+        fixed, record = self.repair("layers_0_Reshape_1", ["842"], ["/layers.0/Mul_output_0"])
+        self.assertEqual(fixed, "/layers.0/Reshape_1")
+        self.assertEqual((record["status"], record["source"]), ("renamed", "io_scope"))
+
+    def test_dotted_ambiguity_and_collision_keep_original_names(self):
+        name = "layers_0_Reshape_1"
+        fixed, record = self.repair(name, ["/layers.0/Reshape_1_output_0",
+                                         "/layers_0/Reshape_1_output_1"])
+        self.assertEqual(fixed, name)
+        self.assertEqual(record["status"], "ambiguous")
+        self.assertEqual(len(record["candidates"]), 2)
+        m = model([
+            h.make_node("Identity", ["x"], ["/layers.0/Identity_output_0"], name="layers_0_Identity"),
+            h.make_node("Identity", ["x"], ["y"], name="/layers.0/Identity"),
+        ], [vi("x")], [vi("y")])
+        fixed, report = repair_node_names(m)
+        self.assertEqual(report[0]["status"], "collision")
+        self.assertEqual(fixed.graph.node[0].name, "layers_0_Identity")
+
     def test_node_name_repair_also_fills_required_graph_name(self):
         m = model([h.make_node("Identity", ["x"], ["y"])], [vi("x")], [vi("y")])
         m.graph.ClearField("name")
