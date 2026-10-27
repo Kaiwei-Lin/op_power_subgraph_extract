@@ -1,5 +1,6 @@
 # Local models, profiling data, and generated reports
 models/
+name_aliases.json
 outputs/
 networkx/
 *.onnx

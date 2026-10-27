@@ -9,6 +9,7 @@ import pickle
 import onnx
 
 from .core import extract_prefix, networkx_to_onnx, onnx_to_networkx, repair_node_names
+from .core import check_name_outputs, load_name_aliases
 from .omc import omc_to_networkx
 
 
@@ -28,11 +29,17 @@ def main():
             cmd.add_argument("--prefix", required=True)
         if command in ("convert", "extract"):
             cmd.add_argument("--repair-names", action="store_true")
+        if command != "restore":
+            cmd.add_argument("--name-aliases", type=Path, help="JSON prefix aliases: {old: new}")
         if command == "convert":
             cmd.add_argument("--ge-proto", type=Path, help="DDK ge_ir_pb2.py for OMC input")
         if command == "repair-names":
             cmd.add_argument("--report", type=Path, help="JSON report (default: destination.rename.json)")
     args = parser.parse_args()
+    try:
+        aliases = load_name_aliases(getattr(args, "name_aliases", None))
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.source.resolve() == args.destination.resolve():
         parser.error("Source and destination must differ")
     is_omc = args.source.suffix.lower() in {".omc", ".om"}
@@ -48,12 +55,17 @@ def main():
         with args.source.open("rb") as stream:
             graph = pickle.load(stream)
         model = networkx_to_onnx(graph)
+        issues = graph.graph.get("name_output_mismatches", [])
     elif args.command == "repair-names":
-        model, report = repair_node_names(onnx.load(str(args.source)))
+        model, report = repair_node_names(onnx.load(str(args.source)), name_aliases=aliases)
+        issues = check_name_outputs(model, name_aliases=aliases, rename_report=report)
         onnx.checker.check_model(model)
     else:
-        graph = (omc_to_networkx(args.source, repair_names=args.repair_names, ge_proto_path=args.ge_proto)
-                 if is_omc else onnx_to_networkx(args.source, repair_names=args.repair_names))
+        graph = (omc_to_networkx(args.source, repair_names=args.repair_names, ge_proto_path=args.ge_proto,
+                                 name_aliases=aliases)
+                 if is_omc else onnx_to_networkx(args.source, repair_names=args.repair_names,
+                                                name_aliases=aliases))
+        issues = graph.graph["name_output_mismatches"]
         if args.command == "extract":
             graph = extract_prefix(graph, args.prefix)
             model = networkx_to_onnx(graph)
@@ -71,7 +83,8 @@ def main():
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
             summary["rename_status"] = dict(Counter(r["status"] for r in report))
-    print(json.dumps(dict(destination=str(args.destination), **summary), ensure_ascii=False, indent=2))
+    print(json.dumps(dict(destination=str(args.destination), name_output_mismatches=issues, **summary),
+                     ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

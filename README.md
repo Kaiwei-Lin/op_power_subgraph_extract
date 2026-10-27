@@ -50,6 +50,7 @@ python -m onnx_graph.main
 PACKAGE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = PACKAGE_DIR / "models/handfree_ainr/handfree_ainr.onnx"
 REPAIR_NAMES = True  # 自动统计和导出共用
+NAME_ALIASES_JSON = None  # 可选：PACKAGE_DIR / "name_aliases.json"
 OUTPUT_DIR = MODEL_PATH.parent / "networkx/main_example"
 BATCH_FROM_STATS = True
 GENERATE_STATS = True  # 默认先生成本次统计，再筛选、导出
@@ -119,6 +120,7 @@ OUTPUT_DIR/
       failures.csv
     batch_export.csv      # 每行的前缀、状态、导出路径、输入输出及失败原因
     batch_export.json     # 同时保留筛选条件和各行原始统计值
+    name_output_mismatches.json  # 名称与 outputs 仍无法确认对应的节点
     representatives_summary.csv  # 所有层级代表子图的时间总表
 ```
 
@@ -266,7 +268,57 @@ output:  /layers.0/Reshape_1_output_0
 
 匹配时将 `/`、`*`、`.` 统一按 `_` 比较，确定唯一候选后使用张量路径的原始拼写。因此 `layers.0` 的点号和 `Reshape_1` 的下划线都会保留。点号不增加 slash 层级：`layers.0` 对应 0 个 `/`，`layers.0/Reshape_1` 对应 1 个 `/`。多个路径扁平化后相同仍标记为 `ambiguous`，不会猜选。更新后保持 `REPAIR_NAMES = True`，并用 `GENERATE_STATS = True` 重新生成前缀统计。
 
-修复规则：
+### JSON 前缀别名与未匹配检查
+
+如果名称前缀本身不同，例如 `spNetFC_1` 对应 `oSpatialNet_freq_cmps_1`，可以复制 `onnx_graph/name_aliases.example.json` 为 `onnx_graph/name_aliases.json`，填写：
+
+~~~json
+{
+  "spNetFC_1": "oSpatialNet_freq_cmps_1"
+}
+~~~
+
+在 `main.py` 中启用：
+
+~~~python
+REPAIR_NAMES = True
+NAME_ALIASES_JSON = PACKAGE_DIR / "name_aliases.json"
+GENERATE_STATS = True
+~~~
+
+这份配置由统计、导出和 profiling 名称匹配共用，运行期间只读取一次；默认 `None` 不启用别名。个人配置 `name_aliases.json` 已加入忽略规则，示例文件随代码提供。修改映射后需要重新生成统计，使 CSV 前缀与导出一致。
+
+例如 `spNetFC_1_fconv1_1_conv_Conv` 与 `/oSpatialNet_freq_cmps_1/fconv1.1/conv/Conv_output_0` 会对应到节点名 `/oSpatialNet_freq_cmps_1/fconv1.1/conv/Conv`。别名只用于比较，仍需输入输出路径的证据，不会单凭配置强制改名。
+
+规则是从名称开头匹配，最长前缀优先，一次替换；`spNetFC_1` 不匹配 `spNetFC_10`，不做任意位置的替换，也不递归应用别名链。原有名称能直接对应输出时优先使用原有对应关系。JSON 必须是字符串到字符串的对象；文件不存在、格式错误、空前缀、重复键或扁平化后冲突的键会报错。
+
+应用别名和修复后，会逐一检查当前节点名与 outputs（去除 `_output_数字` 或 `:数字` 后）的对应关系。控制台打印**全部**未确认节点的原始 name、当前 name、outputs 和原因，包含已有 `/` 但输出不匹配的节点，以及通过 input 恢复名称后仍不能对应 output 的节点；空名称继续跳过。
+
+诊断保存在：
+
+- 自动统计：`STATS_DIR/name_output_mismatches.json`，同时写入 `stats.json` 的同名字段及 `stats.txt`。
+- 批量导出：`OUTPUT_DIR/batch/name_output_mismatches.json`，同时写入 `batch_export.json`。
+- 单前缀示例：`OUTPUT_DIR/name_output_mismatches.json`。
+
+每条记录包含 `node_id`、`op_type`、`original_name`、`name`、`outputs`、`reason`、`rename_status`。原因包括 `no_output_match`（没有对应输出）、`ambiguous_outputs`（多个候选路径）、`ambiguous_name`（名称恢复有歧义）、`name_collision`（改名冲突）和 `missing_outputs`（没有输出）。未发现问题时文件内容为 `[]`；仅复用统计且没有选中任何子图时，导出阶段不会加载模型，诊断文件为 `null`，控制台会说明未检查。
+
+节点名和张量名本来就不要求相同，因此这些记录表示无法确认命名对应关系，不代表 ONNX 连接有错误。相关节点仍保留，前缀分组以当前名称为准。
+
+独立命令和 Python API 也支持：
+
+~~~powershell
+python -m onnx_graph.stats model.onnx --name-aliases onnx_graph/name_aliases.json
+python -m onnx_graph repair-names model.onnx fixed.onnx --name-aliases onnx_graph/name_aliases.json
+~~~
+
+~~~python
+graph = onnx_to_networkx("model.onnx", repair_names=True, name_aliases="name_aliases.json")
+issues = graph.graph["name_output_mismatches"]
+~~~
+
+`name_aliases` 也可直接传入字典；`repair_node_names`、`analyze_subgraphs`、`export_from_stats`、`omc_to_networkx` 使用同一个参数名。OMC 只修复显示名称并检查描述符名称，原始依赖和二进制信息保留。名称修复 CLI 在输出 JSON 中列出 `name_output_mismatches`；其改名报告也包含每个节点的 outputs。
+
+### 通用修复规则
 
 1. 空名称（包括字段缺省、空字符串、纯空白）直接跳过名称修复，报告标记为 `skipped_unnamed`。
 2. 对已有名称，优先使用 OUTPUTS，去除末尾 `_output_数字` 或 `:数字`，再验证路径扁平化后是否对应原名。
@@ -557,7 +609,7 @@ python -m unittest discover -s onnx_graph/tests -v
 python -m onnx_graph.verify_mobilenet
 ```
 
-114 个测试通过。其中 10 个完整流程测试覆盖统计/时间/联合筛选/导出去重及总表衔接、修复名称共用、排除遗留层级 CSV、复用已有统计、统计失败停止、形状假设和可选 profiling、总表零值/部分覆盖、OMC 仅统计分支、自定义 domain 算子计数及指定 CSV 校验；8 个导出去重联动测试覆盖默认开启/关闭、代表清单与最终文件一致、重复运行、只处理本次筛选结果、空选择、解析失败保留、分组/删除失败、越界及文件变化检查、跨层级相似分组；14 个相似度测试覆盖连接顺序、串并联、端口、共享张量、独立分支排列、忽略名称和普通浮点权重、类型/形状/属性差异、控制常量及其上游值、外部权重、WL 特征相同但不同构、未知/动态形状、聚类链式误合并、分层报告与清单迁移、相似模式及失败记录；14 个批量导出测试覆盖严格阈值、AND/OR 联合条件、未知值、分层批量导出与数值结果、前缀边界、名称修复、重复/已有文件保留、文件名冲突、空筛选结果、空 CSV、控制台及清单中的过滤/失败原因、CSV 校验、统计与模型不一致、缺少边界类型时继续处理其他子图；32 个转换测试覆盖完整字段往返、空图名补齐、空图名模型运行 main.py、控制流子图空图名、重复与空名称、无名输入输出算子的跳过及边界保留、多输入/输出、多重边、前缀边界、名称修复歧义、控制流外部依赖、外部与稀疏权重、局部函数、量化元数据等；14 个统计测试覆盖层级分组、修复开关、分组/depthwise 卷积、矩阵乘法与广播、池化/归一化、不同 opset 的 Softmax、动态形状、未知算子、分层 CSV 的算子列/未知值/中文及特殊字符、空层级和报告输出；11 个运行时间测试覆盖多轮均值、多个运行算子映射、修复前后名称、歧义、不完整时间、零值及吞吐率、CSV 数据校验、可选开关和导出；11 个 OMC 测试覆盖嵌套图、区域隔离、多重/控制边、原始信息及 pickle 保留、CLI 转换、空名称和修复、32/64 位分区表、畸形文件、schema 不执行、分层 CSV 和 depthwise/融合计算量。OMC 集成测试需要 DDK GE schema，未提供时会明确跳过；ONNX 测试不依赖 DDK。
+125 个测试通过。新增 10 个别名测试覆盖 JSON 校验、最长前缀及边界、原始模型保留、输出与 input 证据、歧义及重名、缺少输出、profiling 别名匹配、完整流程及全部未匹配节点的打印和保存、CLI 参数；其中 10 个完整流程测试覆盖统计/时间/联合筛选/导出去重及总表衔接、修复名称共用、排除遗留层级 CSV、复用已有统计、统计失败停止、形状假设和可选 profiling、总表零值/部分覆盖、OMC 仅统计分支、自定义 domain 算子计数及指定 CSV 校验；8 个导出去重联动测试覆盖默认开启/关闭、代表清单与最终文件一致、重复运行、只处理本次筛选结果、空选择、解析失败保留、分组/删除失败、越界及文件变化检查、跨层级相似分组；14 个相似度测试覆盖连接顺序、串并联、端口、共享张量、独立分支排列、忽略名称和普通浮点权重、类型/形状/属性差异、控制常量及其上游值、外部权重、WL 特征相同但不同构、未知/动态形状、聚类链式误合并、分层报告与清单迁移、相似模式及失败记录；14 个批量导出测试覆盖严格阈值、AND/OR 联合条件、未知值、分层批量导出与数值结果、前缀边界、名称修复、重复/已有文件保留、文件名冲突、空筛选结果、空 CSV、控制台及清单中的过滤/失败原因、CSV 校验、统计与模型不一致、缺少边界类型时继续处理其他子图；32 个转换测试覆盖完整字段往返、空图名补齐、空图名模型运行 main.py、控制流子图空图名、重复与空名称、无名输入输出算子的跳过及边界保留、多输入/输出、多重边、前缀边界、名称修复歧义、控制流外部依赖、外部与稀疏权重、局部函数、量化元数据等；14 个统计测试覆盖层级分组、修复开关、分组/depthwise 卷积、矩阵乘法与广播、池化/归一化、不同 opset 的 Softmax、动态形状、未知算子、分层 CSV 的算子列/未知值/中文及特殊字符、空层级和报告输出；11 个运行时间测试覆盖多轮均值、多个运行算子映射、修复前后名称、歧义、不完整时间、零值及吞吐率、CSV 数据校验、可选开关和导出；12 个 OMC 测试覆盖嵌套图、区域隔离、多重/控制边、原始信息及 pickle 保留、CLI 转换、空名称和修复、32/64 位分区表、畸形文件、schema 不执行、分层 CSV 和 depthwise/融合计算量。OMC 集成测试需要 DDK GE schema，未提供时会明确跳过；ONNX 测试不依赖 DDK。
 
 给定模型结果：241 个节点、279 条依赖边、144 个初始化张量。经过 pickle 保存/加载和 ONNX 恢复后，与原始文件**逐字节一致**。
 

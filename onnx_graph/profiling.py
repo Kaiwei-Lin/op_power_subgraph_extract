@@ -7,12 +7,12 @@ from pathlib import Path
 import re
 
 if __package__:
-    from .core import _flat
+    from .core import _alias_flat, _flat, load_name_aliases
 else:
-    from core import _flat
+    from core import _alias_flat, _flat, load_name_aliases
 
 
-def _match_name(name, exact, flattened):
+def _match_name(name, exact, flattened, aliases):
     # 原始名称可能本身含括号，因此先精确匹配，再尝试去掉运行时类型后缀。
     stripped = re.sub(r"\([^()]*\)$", "", name).strip()
     for candidate, method in [(name, "exact"), (stripped, "type_suffix_removed")]:
@@ -22,18 +22,24 @@ def _match_name(name, exact, flattened):
         key = _flat(candidate)
         if key and key in flattened:
             return sorted(flattened[key]), "unique_flattened_name"
+    for candidate in (name, stripped):
+        key = _alias_flat(candidate, aliases)
+        if key and key in flattened:
+            return sorted(flattened[key]), "alias_flattened_name"
     return [], "unmatched"
 
 
-def attach_profile(nodes, csv_path):
+def attach_profile(nodes, csv_path, *, name_aliases=None):
     """每个运行算子多条记录取均值；同一 ONNX 节点的不同运行算子均值相加。"""
     path = Path(csv_path)
+    aliases = load_name_aliases(name_aliases)
     exact, flattened = defaultdict(set), defaultdict(set)
     for node in nodes:
         node.update(exec_time=None, exec_time_samples=0, profile_entries=[])
         for name in {node["name"].strip(), node["original_name"].strip()} - {""}:
             exact[name].add(node["node_id"])
             flattened[_flat(name)].add(node["node_id"])
+            flattened[_alias_flat(name, aliases)].add(node["node_id"])
 
     groups, models = {}, set()
     rows_read = 0
@@ -78,7 +84,7 @@ def attach_profile(nodes, csv_path):
     entries = []
     for group in groups.values():
         samples = group.pop("samples")
-        candidates, method = _match_name(group["lookup_name"], exact, flattened)
+        candidates, method = _match_name(group["lookup_name"], exact, flattened, aliases)
         mean = fsum(x / len(samples) for x in samples) if samples else None
         status = "matched" if len(candidates) == 1 else "ambiguous" if candidates else "unmatched"
         if status == "matched" and mean is None:
@@ -109,6 +115,7 @@ def attach_profile(nodes, csv_path):
             "时间单位 us；同一运行算子的多条有效记录取平均，再对匹配到子图的算子均值求和。",
             "保留全部采样（包括首轮）；若不同算子的采样次数不同，仍各自取平均，次数记录在 JSON 中。",
             "按修复前/后的名称匹配，允许去掉末尾 (运行时类型)；/、*、.、_ 扁平化仅接受唯一候选。",
+            "可选前缀别名与名称修复共用；最长前缀优先、仅替换一次，歧义不分配时间。",
             "缺失、歧义或无时间的节点不补零；exec_time 完整值留空，known_exec_time 保留已匹配部分。",
             "未匹配的编译器插入/融合算子不分配给邻近节点；名称匹配不能证明融合范围。",
             "exec_time 是算子时间之和，不是考虑并行、调度及传输后的子图端到端延迟。",

@@ -116,6 +116,19 @@ class OmcTests(unittest.TestCase):
         self.assertEqual(list(plain.edges), list(repaired.edges))
         self.assertEqual(nodes_by_prefix(plain, "root/block_1"), [])
 
+    def test_alias_mapping_and_diagnostics_keep_global_region_ids(self):
+        self.save(self.model("legacy_1_Add"))
+        graph = omc_to_networkx(self.path, repair_names=True, name_aliases={"legacy_1": "root/block_1"})
+        node_id = nodes_by_prefix(graph, "root/block_1")[0]
+        self.assertEqual(graph.nodes[node_id]["name"], "/root/block_1/Add")
+        self.assertEqual(graph.graph["rename_report"][node_id]["source"], "output_alias")
+        self.assertNotIn(node_id, [r["node_id"] for r in graph.graph["name_output_mismatches"]])
+        for issue in graph.graph["name_output_mismatches"]:
+            self.assertEqual(issue["original_name"], graph.nodes[issue["node_id"]]["original_name"])
+            self.assertEqual(issue["region_id"], graph.nodes[issue["node_id"]]["region_id"])
+        report = analyze_subgraphs(self.path, name_aliases={"legacy_1": "root/block_1"}, repair_names=True)
+        self.assertEqual(report["levels"][0]["subgraphs"][0]["prefix"], "root/block_1")
+
     def test_empty_boundary_name_is_preserved_and_ignored(self):
         m = self.model()
         m.graph[0].op[-1].name = ""

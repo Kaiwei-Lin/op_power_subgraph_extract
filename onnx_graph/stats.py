@@ -11,11 +11,11 @@ from pathlib import Path
 import onnx
 
 if __package__:
-    from .core import _fill_graph_names, onnx_to_networkx
+    from .core import _fill_graph_names, format_name_output_mismatches, load_name_aliases, onnx_to_networkx
     from .profiling import attach_profile, time_totals
     from .omc import omc_to_networkx, statistics_nodes
 else:
-    from core import _fill_graph_names, onnx_to_networkx
+    from core import _fill_graph_names, format_name_output_mismatches, load_name_aliases, onnx_to_networkx
     from profiling import attach_profile, time_totals
     from omc import omc_to_networkx, statistics_nodes
 
@@ -24,6 +24,7 @@ else:
 PACKAGE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = PACKAGE_DIR / "models/handfree_ainr/handfree_ainr.onnx"
 REPAIR_NAMES = True
+NAME_ALIASES_JSON = None  # 可选：PACKAGE_DIR / "name_aliases.json"
 SLASH_COUNTS = [1, 2]  # 1: root/block；2: root/block/layer；前导 / 不计数
 BATCH_SIZE = 1  # 仅将输入的未知第 0 维视为 batch；设 None 可禁用这一假设
 INPUT_SHAPES = {}  # 例如 {"input:0": [1, 224, 224, 3]}，用于指定真实输入尺寸
@@ -229,8 +230,10 @@ def _totals(nodes, include_time=False):
 
 
 def analyze_subgraphs(source, slash_counts=(1, 2), *, repair_names=True,
-                      batch_size=None, input_shapes=None, profile_csv=None, ge_proto_path=None):
+                      batch_size=None, input_shapes=None, profile_csv=None, ge_proto_path=None,
+                      name_aliases=None):
     """统计每个层级的互不重叠前缀分组；按扩展名识别 OMC/OM。"""
+    aliases = load_name_aliases(name_aliases)
     counts = list(dict.fromkeys(slash_counts))
     if not counts or any(type(k) is not int or k < 0 for k in counts):
         raise ValueError("slash_counts 必须包含至少一个非负整数")
@@ -240,7 +243,8 @@ def analyze_subgraphs(source, slash_counts=(1, 2), *, repair_names=True,
     if is_omc:
         if input_shapes:
             raise ValueError("OMC 使用编译时的张量形状，不支持 --input-shape 覆盖；请重新编译模型")
-        graph = omc_to_networkx(source, repair_names=repair_names, ge_proto_path=ge_proto_path)
+        graph = omc_to_networkx(source, repair_names=repair_names, ge_proto_path=ge_proto_path,
+                               name_aliases=aliases)
         nodes, excluded = statistics_nodes(graph)
         graph_name = graph.graph["name"]
         root_regions = {r["region_id"] for r in graph.graph["regions"] if r["parent_node_id"] is None}
@@ -259,7 +263,7 @@ def analyze_subgraphs(source, slash_counts=(1, 2), *, repair_names=True,
                         "excluded_operator_counts": dict(Counter(graph.nodes[i]["op_type"] for i in excluded)),
                         "regions": [{k: v for k, v in r.items() if k != "proto"} for r in graph.graph["regions"]]}
     else:
-        graph = onnx_to_networkx(source, repair_names=repair_names)
+        graph = onnx_to_networkx(source, repair_names=repair_names, name_aliases=aliases)
         model = graph.graph["model"]
         graph_name = model.graph.name
         info, inputs, assumptions, warnings = _infer(model, input_shapes or {}, batch_size)
@@ -278,7 +282,7 @@ def analyze_subgraphs(source, slash_counts=(1, 2), *, repair_names=True,
                 record.update(macs=None, flops=None, reason=str(exc))
             nodes.append(record)
     include_time = profile_csv is not None
-    profile = attach_profile(nodes, profile_csv) if include_time else None
+    profile = attach_profile(nodes, profile_csv, name_aliases=aliases) if include_time else None
     levels = []
     for count in counts:
         groups = defaultdict(list)
@@ -300,6 +304,7 @@ def analyze_subgraphs(source, slash_counts=(1, 2), *, repair_names=True,
     report = {"source": str(Path(source).resolve()) if isinstance(source, (str, Path)) else "<ModelProto>",
             "source_format": "OMC" if is_omc else "ONNX",
             "graph_name": graph_name, "repair_names": repair_names,
+            "name_aliases": aliases, "name_output_mismatches": graph.graph["name_output_mismatches"],
             "rename_report": graph.graph.get("rename_report", []), "inputs": inputs,
             "assumptions": assumptions, "warnings": warnings, "conventions": conventions,
             "total": _totals(nodes, include_time), "levels": levels, "nodes": nodes, **extra}
@@ -328,6 +333,7 @@ def format_report(report):
     if report["rename_report"]:
         statuses = Counter(x["status"] for x in report["rename_report"])
         lines += [f"名称处理: {dict(statuses)}（详细记录见 JSON）"]
+    lines += ["", format_name_output_mismatches(report.get("name_output_mismatches", []))]
     if "profile" in report:
         profile = report["profile"]
         lines += ["", f"运行时间 CSV: {profile['source']}",
@@ -407,6 +413,8 @@ def write_reports(report, output_dir):
     output.mkdir(parents=True, exist_ok=True)
     (output / "stats.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     (output / "stats.txt").write_text(format_report(report), encoding="utf-8")
+    (output / "name_output_mismatches.json").write_text(
+        json.dumps(report.get("name_output_mismatches", []), ensure_ascii=False, indent=2), encoding="utf-8")
     return write_csv_reports(report, output)
 
 
@@ -416,6 +424,8 @@ def main(argv=None):
     parser.add_argument("--slashes", type=int, nargs="+", default=SLASH_COUNTS,
                         help="前缀中 / 的数量，不包括前导 /；例如 --slashes 1 2")
     parser.add_argument("--repair-names", action=argparse.BooleanOptionalAction, default=REPAIR_NAMES)
+    parser.add_argument("--name-aliases", type=Path, default=NAME_ALIASES_JSON,
+                        help="可选 JSON 前缀别名：{旧前缀: 新前缀}")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--no-batch-assumption", dest="batch_size", action="store_const", const=None)
     parser.add_argument("--input-shape", action="append", default=[], metavar="NAME=DIM,DIM,...")
@@ -438,7 +448,7 @@ def main(argv=None):
     try:
         report = analyze_subgraphs(args.model, args.slashes, repair_names=args.repair_names,
                                    batch_size=args.batch_size, input_shapes=shapes, profile_csv=args.profile_csv,
-                                   ge_proto_path=args.ge_proto)
+                                   ge_proto_path=args.ge_proto, name_aliases=args.name_aliases)
     except ValueError as exc:
         parser.error(str(exc))
     suffix = "_omc_stats" if report["source_format"] == "OMC" else "_stats"

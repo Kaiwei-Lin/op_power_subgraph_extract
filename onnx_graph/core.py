@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from copy import deepcopy
+import json
 from pathlib import Path
 import re
 from typing import Mapping
@@ -17,29 +18,110 @@ def _flat(name: str) -> str:
     return name.strip("/*").replace("/", "_").replace("*", "_").replace(".", "_")
 
 
+def load_name_aliases(source=None) -> dict[str, str]:
+    """Load optional JSON/dict prefix aliases; normalize only for comparison."""
+    def unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"名称别名 JSON 有重复键: {key!r}")
+            result[key] = value
+        return result
+
+    if source is None:
+        return {}
+    if isinstance(source, (str, Path)):
+        with Path(source).open(encoding="utf-8-sig") as stream:
+            source = json.load(stream, object_pairs_hook=unique_pairs)
+    if not isinstance(source, Mapping):
+        raise ValueError("名称别名必须是 JSON 对象：{旧前缀: 新前缀}")
+    result = {}
+    for old, new in source.items():
+        if not isinstance(old, str) or not isinstance(new, str):
+            raise ValueError("名称别名的旧前缀和新前缀必须都是字符串")
+        old, new = _flat(old.strip()), _flat(new.strip())
+        if not old or not new:
+            raise ValueError("名称别名的前缀不能为空")
+        if old in result:
+            raise ValueError(f"名称别名扁平化后有重复前缀: {old!r}")
+        result[old] = new
+    return dict(sorted(result.items(), key=lambda item: (-len(item[0]), item[0])))
+
+
+def _alias_flat(name, aliases):
+    name = _flat(name)
+    for old, new in aliases.items():
+        if name == old or name.startswith(old + "_"):
+            return new + name[len(old):]  # 最长前缀、只替换一次，避免别名链改变含义。
+    return name
+
+
 def _tensor_stem(name: str) -> str:
     return re.sub(r"(?:_output_\d+|:\d+)$", "", name)
 
 
-def _name_candidate(node: NodeProto) -> tuple[list[str], str]:
+def _name_candidate(node: NodeProto, aliases) -> tuple[list[str], str]:
     outputs = {_tensor_stem(t) for t in node.output if "/" in t}
-    exact = sorted(t for t in outputs if _flat(t) == _flat(node.name))
-    if exact:
-        return exact, "output"
+    names = list(dict.fromkeys([_flat(node.name), _alias_flat(node.name, aliases)]))
+    for index, name in enumerate(names):
+        exact = sorted(t for t in outputs if _flat(t) == name)
+        if exact:
+            return exact, "output_alias" if index else "output"
 
     # Input paths belong to upstream nodes: only borrow a parent scope when the
     # remaining name is this node's operator (possibly with a numeric suffix).
-    candidates = []
-    for tensor in [*node.output, *node.input]:
-        parts = _tensor_stem(tensor).split("/")
-        for end in range(1, len(parts)):
-            scope = "/".join(parts[:end])
-            prefix = _flat(scope) + "_"
-            if scope.strip("/") and _flat(node.name).startswith(prefix):
-                tail = _flat(node.name)[len(prefix):]
-                if re.fullmatch(re.escape(node.op_type) + r"(?:_+\d+)?", tail):
-                    candidates.append(scope + "/" + tail)
-    return sorted(set(candidates)), "io_scope"
+    for index, name in enumerate(names):
+        candidates = []
+        for tensor in [*node.output, *node.input]:
+            parts = _tensor_stem(tensor).split("/")
+            for end in range(1, len(parts)):
+                scope = "/".join(parts[:end])
+                prefix = _flat(scope) + "_"
+                if scope.strip("/") and name.startswith(prefix):
+                    tail = name[len(prefix):]
+                    if re.fullmatch(re.escape(node.op_type) + r"(?:_+\d+)?", tail):
+                        candidates.append(scope + "/" + tail)
+        if candidates:
+            return sorted(set(candidates)), "io_scope_alias" if index else "io_scope"
+    return [], "io_scope"
+
+
+def check_name_outputs(model, *, name_aliases=None, rename_report=()):
+    """List unconfirmed name/output relationships; this is not ONNX validity checking."""
+    aliases = load_name_aliases(name_aliases)
+    renamed = {r["node_id"]: r for r in rename_report}
+    issues = []
+    for index, node in enumerate(model.graph.node):
+        if not node.name.strip():
+            continue
+        record = renamed.get(index, {})
+        matches = []
+        for name in dict.fromkeys([_flat(node.name), _alias_flat(node.name, aliases)]):
+            matches = sorted({_tensor_stem(t) for t in node.output if t and _flat(_tensor_stem(t)) == name})
+            if matches:
+                break
+        status = record.get("status", "not_repaired")
+        if len(matches) == 1 and status not in {"ambiguous", "collision"}:
+            continue
+        reason = ("name_collision" if status == "collision" else
+                  "ambiguous_outputs" if len(matches) > 1 else
+                  "ambiguous_name" if status == "ambiguous" else
+                  "missing_outputs" if not any(node.output) else "no_output_match")
+        issues.append(dict(node_id=index, op_type=node.op_type,
+                           original_name=record.get("old_name", node.name), name=node.name,
+                           outputs=list(node.output), reason=reason, rename_status=status))
+    return issues
+
+
+def format_name_output_mismatches(issues):
+    if issues is None:
+        return "名称与 outputs 未检查：本次没有选中的待导出子图。"
+    lines = [f"名称与 outputs 未确认对应: {len(issues)} 个节点（空名称跳过）"]
+    for r in issues:
+        lines += [f"[node {r['node_id']}] {r['op_type']}: {r['reason']}",
+                  f"  original_name: {r['original_name']!r}", f"  name: {r['name']!r}",
+                  "  outputs: " + json.dumps(r["outputs"], ensure_ascii=False)]
+    return "\n".join(lines)
 
 
 def _fill_graph_names(graph: onnx.GraphProto, fallback: str = "onnx_graph") -> None:
@@ -53,7 +135,7 @@ def _fill_graph_names(graph: onnx.GraphProto, fallback: str = "onnx_graph") -> N
                 _fill_graph_names(subgraph, f"{fallback}_node_{node_index}_attr_{attr_index}_{graph_index}")
 
 
-def repair_node_names(model: ModelProto) -> tuple[ModelProto, list[dict]]:
+def repair_node_names(model: ModelProto, *, name_aliases=None) -> tuple[ModelProto, list[dict]]:
     """Return an independent model and a per-node report; never rename tensors.
 
     Recover / boundaries only with matching tensor-path evidence. Empty or
@@ -62,6 +144,7 @@ def repair_node_names(model: ModelProto) -> tuple[ModelProto, list[dict]]:
     Operator renaming applies to the main graph. Required GraphProto names are
     filled when missing, including control-flow subgraphs.
     """
+    aliases = load_name_aliases(name_aliases)
     result = deepcopy(model)
     _fill_graph_names(result.graph)
     original_names = Counter(n.name for n in result.graph.node if n.name)
@@ -73,10 +156,11 @@ def repair_node_names(model: ModelProto) -> tuple[ModelProto, list[dict]]:
         elif "/" in node.name:
             status = "already_hierarchical"
         else:
-            candidates, source = _name_candidate(node)
+            candidates, source = _name_candidate(node, aliases)
             status = "renamed" if len(candidates) == 1 else "ambiguous" if candidates else "unresolved"
         proposals.append(dict(node_id=index, old_name=node.name, new_name=node.name,
-                              status=status, source=source, candidates=candidates))
+                              status=status, source=source, candidates=candidates,
+                              op_type=node.op_type, outputs=list(node.output)))
     counts = Counter(r["candidates"][0] for r in proposals if r["status"] == "renamed")
     for node, record in zip(result.graph.node, proposals):
         if record["status"] != "renamed":
@@ -143,21 +227,24 @@ def refresh_graph(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
     return graph
 
 
-def onnx_to_networkx(source: str | Path | ModelProto, *, repair_names: bool = False) -> nx.MultiDiGraph:
+def onnx_to_networkx(source: str | Path | ModelProto, *, repair_names: bool = False,
+                    name_aliases=None) -> nx.MultiDiGraph:
     """One integer-ID vertex per ONNX operator; one edge per input connection.
 
     graph.graph['model'] holds all ModelProto/GraphProto fields, initializers,
     value_info and local functions. Every vertex holds its complete NodeProto.
     Loading a path also loads external tensor data, making the result portable.
     """
+    aliases = load_name_aliases(name_aliases)
     model = deepcopy(source) if isinstance(source, ModelProto) else onnx.load(str(source))
     original_names = [n.name for n in model.graph.node]
     report = []
     if repair_names:
-        model, report = repair_node_names(model)
+        model, report = repair_node_names(model, name_aliases=aliases)
     graph = nx.MultiDiGraph()
     graph.graph.update(model=model, original_node_ids=tuple(range(len(model.graph.node))),
-                       rename_report=report)
+                       rename_report=report, name_aliases=aliases,
+                       name_output_mismatches=check_name_outputs(model, name_aliases=aliases, rename_report=report))
     for index, node in enumerate(model.graph.node):
         graph.add_node(index, proto=deepcopy(node), original_name=original_names[index], original_index=index)
     return refresh_graph(graph)

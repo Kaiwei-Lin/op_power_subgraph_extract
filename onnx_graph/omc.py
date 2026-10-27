@@ -19,9 +19,9 @@ from google.protobuf.message import DecodeError
 import onnx
 
 if __package__:
-    from .core import repair_node_names
+    from .core import check_name_outputs, load_name_aliases, repair_node_names
 else:
-    from core import repair_node_names
+    from core import check_name_outputs, load_name_aliases, repair_node_names
 
 
 _SCHEMA_RELATIVE = Path("tools/tools_ascendc/package/python/opc_tool/ge_ir_pb2.py")
@@ -138,13 +138,14 @@ def _tensor(desc):
             "layout": desc.layout}
 
 
-def omc_to_networkx(source, *, ge_proto_path=None, repair_names=False):
+def omc_to_networkx(source, *, ge_proto_path=None, repair_names=False, name_aliases=None):
     """Keep every GE operator, including Const, Data, NetOutput and GraphOp.
 
     Integer IDs are unique across regions. node['proto'] is the full serialized
     GE OpDef, not an ONNX NodeProto. Node names are display labels; dependencies
     always use the original names and ports. Empty names are preserved.
     """
+    aliases = load_name_aliases(name_aliases)
     path = Path(source)
     raw = path.read_bytes()
     partitions = _partitions(raw)
@@ -160,7 +161,8 @@ def omc_to_networkx(source, *, ge_proto_path=None, repair_names=False):
     result.graph.update(source_format="omc", source=str(path.resolve()), name=model.name,
                         source_bytes=raw, schema_bytes=schema, schema_path=schema_path,
                         partitions=partitions, model_proto=model.SerializeToString(),
-                        regions=[], rename_report=[], warnings=[])
+                        regions=[], rename_report=[], warnings=[], name_aliases=aliases,
+                        name_output_mismatches=[])
 
     def visit(region, parent=None, depth=0):
         if depth > 64:
@@ -191,12 +193,18 @@ def omc_to_networkx(source, *, ge_proto_path=None, repair_names=False):
                             attributes=attrs, input_tensors=tensors_in, output_tensors=tensors_out,
                             constant_tensor=_tensor(constant.desc) if constant is not None else None,
                             is_container=False)
+        evidence = onnx.helper.make_model(onnx.helper.make_graph([
+            onnx.helper.make_node(op.type, [d.name for d in op.input_desc if d.name],
+                                  [d.name for d in op.output_desc if d.name], name=op.name)
+            for op in region.op], "name_evidence", [], []))
+        report = []
         if repair_names:
-            evidence = onnx.helper.make_model(onnx.helper.make_graph([
-                onnx.helper.make_node(op.type, [d.name for d in op.input_desc if d.name],
-                                      [d.name for d in op.output_desc if d.name], name=op.name)
-                for op in region.op], "name_evidence", [], []))
-            _, report = repair_node_names(evidence)
+            evidence, report = repair_node_names(evidence, name_aliases=aliases)
+        issues = check_name_outputs(evidence, name_aliases=aliases, rename_report=report)
+        for issue in issues:
+            issue.update(node_id=ids[issue["node_id"]], region_id=region_id)
+        result.graph["name_output_mismatches"].extend(issues)
+        if repair_names:
             for node_id, record in zip(ids, report):
                 record["node_id"] = node_id
                 result.nodes[node_id]["name"] = record["new_name"]
