@@ -55,7 +55,7 @@ class BatchDedupTests(unittest.TestCase):
     def test_main_keeps_only_representatives_and_records_removed_paths(self):
         original = self.source.read_bytes()
         self.output = self.root / "main" / "batch"
-        with patch.multiple(batch, MODEL_PATH=self.source, STATS_DIR=self.stats, FILTERS=[],
+        with patch.multiple(batch, HIERARCHY_SOURCE="name", MODEL_PATH=self.source, STATS_DIR=self.stats, FILTERS=[],
                             OUTPUT_DIR=self.root / "main", BATCH_FROM_STATS=True, GENERATE_STATS=False,
                             GROUP_MODE="exact", SEPARATE_SLASH_COUNTS=True), redirect_stdout(StringIO()):
             report = batch.main()
@@ -76,7 +76,7 @@ class BatchDedupTests(unittest.TestCase):
         self.assertEqual(self.source.read_bytes(), original)
 
     def test_disabled_keeps_all_and_rerun_preserves_representatives(self):
-        with patch.multiple(batch, MODEL_PATH=self.source, STATS_DIR=self.stats, FILTERS=[],
+        with patch.multiple(batch, HIERARCHY_SOURCE="name", MODEL_PATH=self.source, STATS_DIR=self.stats, FILTERS=[],
                             OUTPUT_DIR=self.root, BATCH_FROM_STATS=True, GENERATE_STATS=False,
                             KEEP_REPRESENTATIVES_ONLY=False), redirect_stdout(StringIO()):
             report = batch.main()
@@ -164,7 +164,7 @@ class BatchDedupTests(unittest.TestCase):
         self.assertEqual(grouped["levels"], [])
 
     def test_main_passes_similarity_mode_and_cross_level_setting(self):
-        with patch.multiple(batch, MODEL_PATH=self.source, STATS_DIR=self.stats, FILTERS=[],
+        with patch.multiple(batch, HIERARCHY_SOURCE="name", MODEL_PATH=self.source, STATS_DIR=self.stats, FILTERS=[],
                             OUTPUT_DIR=self.root, BATCH_FROM_STATS=True, GENERATE_STATS=False,
                             KEEP_REPRESENTATIVES_ONLY=True,
                             GROUP_MODE="similar", SIMILARITY_THRESHOLD=1, SEPARATE_SLASH_COUNTS=False

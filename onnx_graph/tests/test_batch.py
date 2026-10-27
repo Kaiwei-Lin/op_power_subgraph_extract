@@ -103,7 +103,7 @@ class BatchTests(unittest.TestCase):
         nested.mkdir()
         (nested / "stats_1_slash.csv").write_text("invalid", encoding="utf-8")
         original = self.source.read_bytes()
-        with patch.multiple(batch, MODEL_PATH=self.source, STATS_DIR=self.stats,
+        with patch.multiple(batch, HIERARCHY_SOURCE="name", MODEL_PATH=self.source, STATS_DIR=self.stats,
                             OUTPUT_DIR=self.output, FILTERS=[], REPAIR_NAMES=False,
                             BATCH_FROM_STATS=True, GENERATE_STATS=False), redirect_stdout(StringIO()):
             report = batch.main()
@@ -218,7 +218,7 @@ class BatchTests(unittest.TestCase):
         from onnx_graph import stats
         stats.write_csv_reports(
             stats.analyze_subgraphs(self.source, [1], repair_names=stats.REPAIR_NAMES), self.stats)
-        with patch.multiple(batch, MODEL_PATH=self.source, STATS_DIR=self.stats,
+        with patch.multiple(batch, HIERARCHY_SOURCE="name", MODEL_PATH=self.source, STATS_DIR=self.stats,
                             OUTPUT_DIR=self.root / "default_main", FILTERS=[],
                             BATCH_FROM_STATS=True, GENERATE_STATS=False), redirect_stdout(StringIO()):
             default_report = batch.main()

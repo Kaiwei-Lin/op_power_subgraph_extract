@@ -147,7 +147,7 @@ class NameAliasTests(unittest.TestCase):
             self.model.graph.node.append(h.make_node(
                 "Relu", ["x"], [f"/unknown/Relu_{i}_output_0"], name=f"unmapped_{i}"))
         onnx.save(self.model, self.source)
-        settings = dict(MODEL_PATH=self.source, OUTPUT_DIR=self.root / "out",
+        settings = dict(HIERARCHY_SOURCE="name", MODEL_PATH=self.source, OUTPUT_DIR=self.root / "out",
                         STATS_DIR=self.root / "stats", PROFILE_CSV=self.profile,
                         NAME_ALIASES_JSON=self.alias_file, REPAIR_NAMES=True,
                         BATCH_FROM_STATS=True, GENERATE_STATS=True, SLASH_COUNTS=[1, 3],
@@ -188,7 +188,7 @@ class NameAliasTests(unittest.TestCase):
         self.assertEqual(onnx.load(destination).graph.node[0].name, self.new)
         self.assertEqual(json.loads(output.getvalue())["name_output_mismatches"][0]["name"], "unmapped_Relu")
         with redirect_stdout(StringIO()) as output:
-            stats.main([str(self.source), "--name-aliases", str(self.alias_file),
+            stats.main([str(self.source), "--hierarchy-source", "name", "--name-aliases", str(self.alias_file),
                         "--no-profile", "--output-dir", str(self.root / "cli_stats")])
         self.assertIn("unmapped_Relu", output.getvalue())
         self.assertTrue((self.root / "cli_stats/name_output_mismatches.json").is_file())

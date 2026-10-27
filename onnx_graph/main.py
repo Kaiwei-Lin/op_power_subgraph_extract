@@ -15,12 +15,12 @@ import onnx
 # 同时支持直接运行 main.py 和 python -m onnx_graph.main。
 if __package__:
     from .core import extract_prefix, networkx_to_onnx, nodes_by_prefix, onnx_to_networkx
-    from .core import format_name_output_mismatches, load_name_aliases
+    from .core import format_hierarchy_diagnostics, _hierarchy_options
     from .similarity import group_subgraphs
     from .stats import analyze_subgraphs, write_reports
 else:
     from core import extract_prefix, networkx_to_onnx, nodes_by_prefix, onnx_to_networkx
-    from core import format_name_output_mismatches, load_name_aliases
+    from core import format_hierarchy_diagnostics, _hierarchy_options
     from similarity import group_subgraphs
     from stats import analyze_subgraphs, write_reports
 
@@ -28,9 +28,10 @@ else:
 PACKAGE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = PACKAGE_DIR / "models/handfree_ainr/handfree_ainr.onnx"
 PREFIX = "MobilenetV3/expanded_conv_1"
-REPAIR_NAMES = True  # 自动统计和导出共用；空名称始终跳过名称处理。
-NAME_ALIASES_JSON = None  # 可选：PACKAGE_DIR / "name_aliases.json"；统计/导出/时间匹配共用。
-OUTPUT_DIR = MODEL_PATH.parent / "networkx/main_example"
+HIERARCHY_SOURCE = "outputs"  # outputs 按输出路径分层并保留原始 name；name 使用旧规则。
+REPAIR_NAMES = True  # 仅 HIERARCHY_SOURCE="name" 时生效。
+NAME_ALIASES_JSON = None  # 仅 name 模式生效；可选 PACKAGE_DIR / "name_aliases.json"。
+OUTPUT_DIR = MODEL_PATH.parent / "networkx" / ("main_outputs" if HIERARCHY_SOURCE == "outputs" else "main_example")
 
 # True: 统计、筛选、批量导出；False: 使用原来的 PREFIX 示例。
 BATCH_FROM_STATS = True
@@ -118,6 +119,8 @@ def _write_batch_report(report, output_dir):
         json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     (output_dir / "name_output_mismatches.json").write_text(
         json.dumps(report.get("name_output_mismatches"), ensure_ascii=False, indent=2), encoding="utf-8")
+    (output_dir / "output_hierarchy_issues.json").write_text(
+        json.dumps(report.get("output_hierarchy_issues"), ensure_ascii=False, indent=2), encoding="utf-8")
     with (output_dir / "batch_export.csv").open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow(["统计文件", "CSV行号", "斜杠数", "子图前缀", "状态", "节点数",
@@ -206,10 +209,10 @@ def _retain_representatives(report, output_dir, *, mode, threshold, separate_sla
 
 def export_from_stats(model_path, stats_dir, output_dir, *, filters=None, repair_names=False,
                       deduplicate=False, group_mode="exact", similarity_threshold=0.90,
-                      separate_slash_counts=True, csv_paths=None, name_aliases=None):
+                      separate_slash_counts=True, csv_paths=None, name_aliases=None, hierarchy_source="name"):
     """读取单个模型的分层 CSV；组内 AND、组间 OR；返回逐行导出清单。"""
     model_path, stats_dir, output_dir = map(Path, (model_path, stats_dir, output_dir))
-    aliases = load_name_aliases(name_aliases)
+    repair_names, aliases = _hierarchy_options(hierarchy_source, repair_names, name_aliases)
     if model_path.suffix.lower() != ".onnx":
         raise ValueError("批量导出需要原始 .onnx，不能将 OMC 编译图直接还原为 ONNX")
     if not model_path.is_file():
@@ -236,6 +239,8 @@ def export_from_stats(model_path, stats_dir, output_dir, *, filters=None, repair
             fields = [f.strip() for f in next(reader, [])]
             if not fields or "" in fields or len(set(fields)) != len(fields):
                 raise ValueError(f"{path}: CSV 表头为空或有重复/空字段")
+            if hierarchy_source == "outputs" and "层级来源" not in fields:
+                raise ValueError(f"{path}: CSV 缺少层级来源；请用 HIERARCHY_SOURCE='outputs'、GENERATE_STATS=True 重新统计")
             missing = required - set(fields)
             if missing:
                 raise ValueError(f"{path}: 缺少列 {sorted(missing)}；请检查 FILTERS 或重新生成统计")
@@ -251,6 +256,8 @@ def export_from_stats(model_path, stats_dir, output_dir, *, filters=None, repair
                               status="selected", reason="", onnx_file="", node_count=None,
                               inputs=[], outputs=[])
                 try:
+                    if row.get("层级来源", "name") != hierarchy_source:
+                        raise ValueError("CSV 层级来源与 HIERARCHY_SOURCE 不一致；请重新生成统计")
                     if not prefix:
                         raise ValueError("子图前缀为空，不能将空前缀当作整图导出")
                     if prefix.count("/") != depth:
@@ -264,8 +271,8 @@ def export_from_stats(model_path, stats_dir, output_dir, *, filters=None, repair
                     record.update(status="failed", reason=str(error))
                 records.append(record)
 
-    graph = onnx_to_networkx(model_path, repair_names=repair_names, name_aliases=aliases) if any(
-        r["status"] == "selected" for r in records) else None
+    graph = onnx_to_networkx(model_path, repair_names=repair_names, name_aliases=aliases,
+                            hierarchy_source=hierarchy_source) if any(r["status"] == "selected" for r in records) else None
     seen = set()
     for record in records:
         if record["status"] != "selected":
@@ -276,7 +283,7 @@ def export_from_stats(model_path, stats_dir, output_dir, *, filters=None, repair
             row = record["statistics"]
             ids = nodes_by_prefix(graph, prefix)
             if not ids:
-                raise ValueError("ONNX 中找不到该前缀；请检查模型、REPAIR_NAMES 和 NAME_ALIASES_JSON 是否与统计时一致")
+                raise ValueError("ONNX 中找不到该前缀；请检查模型、HIERARCHY_SOURCE、REPAIR_NAMES 和 NAME_ALIASES_JSON 是否与统计时一致")
             record["node_count"] = len(ids)
             if _number(row["节点数"]) != len(ids):
                 raise ValueError(f"CSV 节点数 {row['节点数']} 与 ONNX 的 {len(ids)} 不一致；请重新生成同一模型的统计")
@@ -296,10 +303,14 @@ def export_from_stats(model_path, stats_dir, output_dir, *, filters=None, repair
             digest = sha256(prefix.encode("utf-8")).hexdigest()[:12]
             target = output_dir / f"slash_{depth}" / f"sg_{stem}_{digest}.onnx"
             record["onnx_file"] = str(target.resolve())
+            sub_model = networkx_to_onnx(extract_prefix(graph, prefix)) if hierarchy_source == "outputs" else None
             if target.exists():
+                if sub_model is not None and target.read_bytes() != sub_model.SerializeToString():
+                    raise ValueError("已有 ONNX 与当前输出层级/原始名称不一致；请使用新的 OUTPUT_DIR 重新导出")
                 record.update(status="exists", reason="已有文件保留；需重新导出时请使用新的输出目录")
                 continue
-            sub_model = networkx_to_onnx(extract_prefix(graph, prefix))
+            if sub_model is None:
+                sub_model = networkx_to_onnx(extract_prefix(graph, prefix))
             payload = sub_model.SerializeToString()
             target.parent.mkdir(parents=True, exist_ok=True)
             with target.open("xb") as stream:
@@ -317,6 +328,8 @@ def export_from_stats(model_path, stats_dir, output_dir, *, filters=None, repair
                   csv_files=[str(path.resolve()) for _, path in files],
                   repair_names=repair_names, filters=filters or [],
                   name_aliases=aliases,
+                  hierarchy_source=hierarchy_source,
+                  output_hierarchy_issues=graph.graph["output_hierarchy_issues"] if graph is not None else None,
                   name_output_mismatches=graph.graph["name_output_mismatches"] if graph is not None else None,
                   counts=dict(Counter(r["status"] for r in records)), records=records)
     _write_batch_report(report, output_dir)
@@ -350,17 +363,17 @@ def export_from_stats(model_path, stats_dir, output_dir, *, filters=None, repair
 
 
 def main():
-    aliases = load_name_aliases(NAME_ALIASES_JSON)
+    repair_names, aliases = _hierarchy_options(HIERARCHY_SOURCE, REPAIR_NAMES, NAME_ALIASES_JSON)
     if BATCH_FROM_STATS:
         csv_paths = None
         if GENERATE_STATS:
             print(f"Generate statistics: {MODEL_PATH}")
             statistics = analyze_subgraphs(
-                MODEL_PATH, SLASH_COUNTS, repair_names=REPAIR_NAMES, batch_size=BATCH_SIZE,
+                MODEL_PATH, SLASH_COUNTS, repair_names=repair_names, batch_size=BATCH_SIZE,
                 input_shapes=INPUT_SHAPES, profile_csv=PROFILE_CSV, ge_proto_path=GE_PROTO_PATH,
-                name_aliases=aliases)
+                name_aliases=aliases, hierarchy_source=HIERARCHY_SOURCE)
             csv_paths = write_reports(statistics, STATS_DIR)
-            print(format_name_output_mismatches(statistics.get("name_output_mismatches", [])))
+            print(format_hierarchy_diagnostics(statistics))
             print(f"Statistics report: {Path(STATS_DIR).resolve() / 'stats.json'}")
             for level, path in zip(statistics["levels"], csv_paths):
                 print(f"slash_{level['slash_count']}: {level['subgraph_count']} subgraphs; {path.resolve()}")
@@ -368,20 +381,21 @@ def main():
                 print("OMC 统计已完成；OMC 编译图不能直接导出为可执行 ONNX，后续导出与去重未运行。")
                 return statistics
         report = export_from_stats(MODEL_PATH, STATS_DIR, OUTPUT_DIR / "batch",
-                                 filters=FILTERS, repair_names=REPAIR_NAMES,
+                                 filters=FILTERS, repair_names=repair_names,
                                  deduplicate=KEEP_REPRESENTATIVES_ONLY, group_mode=GROUP_MODE,
                                  similarity_threshold=SIMILARITY_THRESHOLD,
                                  separate_slash_counts=SEPARATE_SLASH_COUNTS, csv_paths=csv_paths,
-                                 name_aliases=aliases)
+                                 name_aliases=aliases, hierarchy_source=HIERARCHY_SOURCE)
         if not GENERATE_STATS:
-            print(format_name_output_mismatches(report["name_output_mismatches"]))
+            print(format_hierarchy_diagnostics(report))
         return report
-    graph = onnx_to_networkx(MODEL_PATH, repair_names=REPAIR_NAMES, name_aliases=aliases)
-    issues = graph.graph["name_output_mismatches"]
-    print(format_name_output_mismatches(issues))
+    graph = onnx_to_networkx(MODEL_PATH, repair_names=repair_names, name_aliases=aliases,
+                            hierarchy_source=HIERARCHY_SOURCE)
+    print(format_hierarchy_diagnostics(graph.graph))
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    (OUTPUT_DIR / "name_output_mismatches.json").write_text(
-        json.dumps(issues, ensure_ascii=False, indent=2), encoding="utf-8")
+    for key in ("name_output_mismatches", "output_hierarchy_issues"):
+        (OUTPUT_DIR / f"{key}.json").write_text(
+            json.dumps(graph.graph[key], ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Full graph: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 
     # 导出时会校验模型；缺失的 graph.name 会补齐，不能要求与原始无效模型逐字节相同。
@@ -406,7 +420,7 @@ def main():
     model_path = OUTPUT_DIR / "subgraph.onnx"
     onnx.save(sub_model, model_path)
 
-    if REPAIR_NAMES:
+    if repair_names:
         report_path = OUTPUT_DIR / "rename_report.json"
         report_path.write_text(
             json.dumps(graph.graph["rename_report"], ensure_ascii=False, indent=2),

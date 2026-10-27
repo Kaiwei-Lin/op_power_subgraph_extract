@@ -1,6 +1,6 @@
 # ONNX ↔ NetworkX
 
-将 ONNX 转为 `networkx.MultiDiGraph`，保留完整 protobuf 信息和 `/` 名称层级，按前缀提取子图，再生成可独立执行的 ONNX。建议 Python 3.10（最低 3.10）；下方命令从克隆后的仓库根目录运行。
+将 ONNX 转为 `networkx.MultiDiGraph`，保留完整 protobuf 信息和 `/` 路径层级，按前缀提取子图，再生成可独立执行的 ONNX。建议 Python 3.10（最低 3.10）；下方命令从克隆后的仓库根目录运行。
 
 ## 安装与模型位置
 
@@ -49,9 +49,10 @@ python -m onnx_graph.main
 ```python
 PACKAGE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = PACKAGE_DIR / "models/handfree_ainr/handfree_ainr.onnx"
-REPAIR_NAMES = True  # 自动统计和导出共用
-NAME_ALIASES_JSON = None  # 可选：PACKAGE_DIR / "name_aliases.json"
-OUTPUT_DIR = MODEL_PATH.parent / "networkx/main_example"
+HIERARCHY_SOURCE = "outputs"  # 默认按输出路径分层，保留原始 name
+REPAIR_NAMES = True  # 仅 HIERARCHY_SOURCE="name" 时生效
+NAME_ALIASES_JSON = None  # 仅 name 模式生效
+OUTPUT_DIR = MODEL_PATH.parent / "networkx/main_outputs"
 BATCH_FROM_STATS = True
 GENERATE_STATS = True  # 默认先生成本次统计，再筛选、导出
 STATS_DIR = MODEL_PATH.parent / "networkx" / (MODEL_PATH.stem + "_stats")
@@ -67,6 +68,42 @@ GROUP_MODE = "exact"             # 或 "similar"
 SIMILARITY_THRESHOLD = 0.90      # 仅影响 similar 模式
 SEPARATE_SLASH_COUNTS = True     # 不同 slash 层级分别分组
 ```
+
+### 按 outputs 分层、按原始 name 匹配时间（默认）
+
+`main.py` 和独立 `stats.py` 默认使用 `HIERARCHY_SOURCE = "outputs"`。例如：
+
+```text
+原始 node.name: SpNetFC_1_fconv1_0_Transpose
+output:         /oSpatialNet_freq_cmps_1/fconv1.0/Transpose_output_0
+hierarchy_path: oSpatialNet_freq_cmps_1/fconv1.0/Transpose
+```
+
+一个 `/` 的分组为 `oSpatialNet_freq_cmps_1/fconv1.0`，两个 `/` 的分组为 `oSpatialNet_freq_cmps_1/fconv1.0/Transpose`。不要求 name 与 output 能互相转换，也不需要 JSON 别名。点号和真实下划线原样保留。
+
+- `name`、`original_name` 和 NodeProto 保留原始算子名，导出的 ONNX 也保留原名；`hierarchy`、`hierarchy_path` 专门保存输出层级。连接关系仍由张量依赖确定。
+- profiling 以原始 node.name 为索引，支持原有的运行时类型后缀处理及唯一的分隔符归一化匹配；不把 output 路径加入名称索引。空名称、重名或无法匹配的时间保持未知，不补零。
+- 输出末尾 `_output_数字` 或 `:数字` 会去除。多个输出去掉后缀后指向同一路径时，只计一个节点；路径不同时仅分到它们共有的完整父层级，不重复计数、不任选某个分支。
+- 没有带 `/` 的输出路径、没有输出或输出之间没有共同层级时，保留节点但不参加前缀分组。不会回退到 name 或 input 猜层级。无名节点只要有可用输出路径，也可参加分组。
+- 控制台完整打印多输出共同层级和无法分层节点的 name、outputs、分配路径及原因；记录保存到 `output_hierarchy_issues.json`（统计目录、批量导出目录或单前缀输出目录）和主 JSON 报告。`common_output_scope` 表示已归入共同层级；其他原因表示未分层。成功检查且无此类节点时为 `[]`，没有选中子图而未加载模型时为 `null`。
+- outputs 模式不运行 name/output 对齐检查，`name_output_mismatches.json` 写为 `null`，避免保留上次名称模式的诊断。`REPAIR_NAMES` 和 `NAME_ALIASES_JSON` 在该模式下不生效。
+
+切换后设置 `GENERATE_STATS = True` 重新生成统计，并使用新的 `OUTPUT_DIR`。默认输出目录已改为 `networkx/main_outputs`。新 CSV 带有 `层级来源=outputs`；缺少该列或来源不同的旧 CSV 不可用于 outputs 导出。已有 ONNX 内容与本次提取不一致时会保留文件并报告失败，要求改用新目录，以免把旧子图与新时间统计混用。
+
+函数 API 为兼容已有脚本，默认仍使用 name；请显式传入 `hierarchy_source="outputs"`，统计和导出保持一致：
+
+```python
+graph = onnx_to_networkx("model.onnx", hierarchy_source="outputs")
+report = analyze_subgraphs("model.onnx", [1, 2], profile_csv="model_op.csv", hierarchy_source="outputs")
+export_from_stats("model.onnx", "stats", "new_subgraphs", hierarchy_source="outputs")
+```
+
+```powershell
+python -m onnx_graph.stats model.onnx --hierarchy-source outputs --profile-csv model_op.csv
+python -m onnx_graph extract model.onnx subgraph.onnx --hierarchy-source outputs --prefix oSpatialNet_freq_cmps_1/fconv1.0
+```
+
+`convert/extract` CLI 的默认值仍为 name；如需按 outputs 分层请传上面的参数。OMC 使用真实 `output_desc.name` 分层，缺失时不会采用合成的 `算子名:端口` 作为层级证据。旧流程可设置 `HIERARCHY_SOURCE = "name"`，继续使用下面的名称修复和 JSON 别名功能。
 
 `GENERATE_STATS = True` 时，在 `STATS_DIR` 更新 `stats.json`、`stats.txt` 和 `SLASH_COUNTS` 对应的 CSV，后续**只读取本次生成的 CSV**。以前运行遗留的其他层级或 `stats_01_slash.csv` 等文件不会混入；这些旧文件不删除。统计或 profiling 读取失败时立即停止，不会退回使用旧表继续导出。`stats.py` 顶部的配置不影响这一自动流程，以 `main.py` 为准。
 
@@ -120,7 +157,8 @@ OUTPUT_DIR/
       failures.csv
     batch_export.csv      # 每行的前缀、状态、导出路径、输入输出及失败原因
     batch_export.json     # 同时保留筛选条件和各行原始统计值
-    name_output_mismatches.json  # 名称与 outputs 仍无法确认对应的节点
+    output_hierarchy_issues.json # 输出层级需关注的节点（含共同父层级或未分层）
+    name_output_mismatches.json  # 旧 name 模式诊断；outputs 模式为 null
     representatives_summary.csv  # 所有层级代表子图的时间总表
 ```
 
@@ -144,13 +182,13 @@ OUTPUT_DIR/
 
 不能解析或不支持比较的 ONNX 会保留，标记 `kept_unchecked` 并写出原因；这些文件不在代表清单里，需单独测试。缺少形状信息的可解析模型保留为独立代表。删除失败则标记 `cleanup_failed`，保留文件。整体分组失败或检测到分组期间文件变化时，不进入删除阶段。一个子图导出失败后继续处理其他子图；零匹配时仍保存空分组和导出清单，不导出整图。批量模式不额外保存完整模型的 pickle。
 
-只看到 `batch_export.csv/json` 不代表导出成功：先看清单中的“状态”和“原因”。例如 `{'filtered': 6267, 'failed': 16}` 表示 6267 行未通过筛选、16 行处理失败，没有任何成功导出；应查看 **failed 行**的原因。`filtered` 行也会记录筛选条件及实际值，空值显示为 `<空>`。控制台直接显示输出目录及各类最多三条原因，完整信息保留在清单中。`main.py` 和 `stats.py` 现在均默认 `REPAIR_NAMES = True`，如果统计时关闭了名称修复，也要在导出时关闭。
+只看到 `batch_export.csv/json` 不代表导出成功：先看清单中的“状态”和“原因”。例如 `{'filtered': 6267, 'failed': 16}` 表示 6267 行未通过筛选、16 行处理失败，没有任何成功导出；应查看 **failed 行**的原因。`filtered` 行也会记录筛选条件及实际值，空值显示为 `<空>`。控制台直接显示输出目录及各类最多三条原因，完整信息保留在清单中。统计与导出必须使用相同的 `HIERARCHY_SOURCE`；旧 name 模式下 `REPAIR_NAMES` 和别名配置也须保持一致。
 
 每个导出模型都使用现有依赖提取逻辑，保留所需权重、推断边界输入输出并运行 ONNX checker。同时检查所选前缀的实际节点数和 CSV 中的算子数量，发现不一致会记录失败。请使用**同一原始 ONNX、相同名称修复设置**生成的统计；这种数量校验不能证明两份同结构但不同权重的模型相同。统计时的 batch/输入尺寸假设不会自动改写导出模型的形状。OMC 编译图不支持直接导出 ONNX，也不能假定其融合后的 CSV 与原始 ONNX 一一对应。
 
 ### 原来的单前缀示例
 
-将 `BATCH_FROM_STATS = False`，设置 `MODEL_PATH`、`PREFIX`、`REPAIR_NAMES` 即可继续使用。示例会打印所选节点及其输入输出，保存完整图为 `full_graph.nx.pkl`，导出子图为 `subgraph.onnx`。默认保存到模型所在目录下的 `networkx/main_example/`；重复运行会更新这些单前缀示例产物。启用名称修复时还会保存 `rename_report.json`。
+将 `BATCH_FROM_STATS = False`，设置 `MODEL_PATH`、`PREFIX`、`HIERARCHY_SOURCE` 即可继续使用。示例会打印所选节点及其输入输出，保存完整图为 `full_graph.nx.pkl`，导出子图为 `subgraph.onnx`。默认保存到模型所在目录下的 `networkx/main_outputs/`；重复运行会更新这些单前缀示例产物。启用名称修复时还会保存 `rename_report.json`。
 
 ## 快速使用
 
@@ -237,7 +275,9 @@ model = networkx_to_onnx(
 
 完整模型保留训练信息；带 `training_info` 的模型暂不支持截取，以免留下指向已移除节点的训练绑定。
 
-## 按输入输出路径修复名称
+## 按输入输出路径修复名称（旧 name 模式）
+
+以下配置仅在 `HIERARCHY_SOURCE = "name"` 时生效。默认 outputs 分层保留原始名称，无需执行修复。
 
 ```python
 graph = onnx_to_networkx("company.onnx", repair_names=True)
@@ -281,6 +321,7 @@ output:  /layers.0/Reshape_1_output_0
 在 `main.py` 中启用：
 
 ~~~python
+HIERARCHY_SOURCE = "name"
 REPAIR_NAMES = True
 NAME_ALIASES_JSON = PACKAGE_DIR / "name_aliases.json"
 GENERATE_STATS = True
@@ -307,7 +348,7 @@ GENERATE_STATS = True
 独立命令和 Python API 也支持：
 
 ~~~powershell
-python -m onnx_graph.stats model.onnx --name-aliases onnx_graph/name_aliases.json
+python -m onnx_graph.stats model.onnx --hierarchy-source name --name-aliases onnx_graph/name_aliases.json
 python -m onnx_graph repair-names model.onnx fixed.onnx --name-aliases onnx_graph/name_aliases.json
 ~~~
 
@@ -363,7 +404,8 @@ python -m onnx_graph extract company.onnx company.block.onnx --repair-names --pr
 
 ```python
 MODEL_PATH = Path(r"D:/models/company.onnx")
-REPAIR_NAMES = True
+HIERARCHY_SOURCE = "outputs"
+REPAIR_NAMES = True  # 仅 name 模式生效
 SLASH_COUNTS = [1, 2]  # 只看一个层级可改成 [1] 或 [2]；支持其他非负整数
 BATCH_SIZE = 1
 INPUT_SHAPES = {}  # 例如 {"input:0": [1, 224, 224, 3]}
@@ -379,7 +421,7 @@ OUTPUT_DIR = None  # 默认在模型旁的 networkx/<模型名>_stats/ 保存报
 | `[2]` | `MobilenetV3/expanded_conv_1/depthwise` | depthwise 下的所有节点 |
 | `[1, 2]` | 同时列出以上两种层级 | 各层级独立统计，不把两个层级的计算量相加 |
 
-每个节点在同一层级只归入一个前缀；`expanded_conv_1` 不会匹配 `expanded_conv_10`。前缀恰好是完整节点名时，它也构成一个单节点子图。无名节点和名称不足该深度的节点不参与该层级分组，报告单独列出其 ID；它们仍参与主图总量统计。每组对应原 NetworkX 图中这些节点诱导出的子图，计算量为其节点计算量之和。
+每个节点在同一层级只归入一个前缀；`expanded_conv_1` 不会匹配 `expanded_conv_10`。前缀恰好是完整层级路径时，它也构成一个子图。无可用层级或路径不足该深度的节点不参与该层级分组，报告通过 unscoped_node_ids 和 shallower_node_ids 单独列出其 ID；它们仍参与主图总量统计。每组对应原 NetworkX 图中这些节点诱导出的子图，计算量为其节点计算量之和。
 
 在仓库根目录运行：
 
@@ -387,14 +429,14 @@ OUTPUT_DIR = None  # 默认在模型旁的 networkx/<模型名>_stats/ 保存报
 # 按 stats.py 的配置运行（默认 handfree_ainr，两个层级；独立统计默认不加载 profiling）
 python onnx_graph/stats.py
 
-# 公司模型：修复名称，只统计前缀有两个 / 的子图
-python -m onnx_graph.stats D:/models/company.onnx --repair-names --slashes 2
+# 公司模型：按输出路径分层，只统计前缀有两个 / 的子图
+python -m onnx_graph.stats D:/models/company.onnx --hierarchy-source outputs --slashes 2
 
 # 指定真实输入尺寸，避免猜测动态维度；多输入可以重复 --input-shape
 python -m onnx_graph.stats D:/models/company.onnx --slashes 1 2 --input-shape "input:0=1,224,224,3"
 
-# 关闭名称修复及 batch 假设，保留未知维度
-python -m onnx_graph.stats D:/models/company.onnx --no-repair-names --no-batch-assumption
+# 按输出分层并关闭 batch 假设，保留未知维度
+python -m onnx_graph.stats D:/models/company.onnx --hierarchy-source outputs --no-batch-assumption
 ```
 
 输出包括控制台和 `stats.txt` 中的**全部子图前缀、节点数、算子类型及数量、MACs、FLOPs**；`stats.json` 还包含每组节点 ID、逐节点形状/计算公式/未知原因、名称修复记录和输入假设。原始 ONNX 不会被修改。
@@ -405,7 +447,7 @@ python -m onnx_graph.stats D:/models/company.onnx --no-repair-names --no-batch-a
 子图名字,节点数,Add数量,AveragePool数量,Clip数量,Conv数量,...,MACs,FLOPs,MFLOPs,计算量完整,未知计算量节点数,已知MACs,已知FLOPs
 ```
 
-算子列根据模型实际包含的类型自动生成，各层级列名及顺序一致；某子图没有的算子填 `0`。`MACs/FLOPs` 是未缩放的数值，`MFLOPs = FLOPs / 1,000,000`，可直接求和或排序。计算量不完整时，完整总量三列留空，`计算量完整` 为“否”，并保留已知部分及未知节点数量。名称修复、输入尺寸和计算口径记录仍在配套 TXT/JSON 中。无名或名称较浅的未分组节点不出现在 CSV 中，因此合计对应当前层级覆盖的节点。
+算子列根据模型实际包含的类型自动生成，各层级列名及顺序一致；某子图没有的算子填 `0`。`MACs/FLOPs` 是未缩放的数值，`MFLOPs = FLOPs / 1,000,000`，可直接求和或排序。计算量不完整时，完整总量三列留空，`计算量完整` 为“否”，并保留已知部分及未知节点数量。名称修复、输入尺寸和计算口径记录仍在配套 TXT/JSON 中。无可用层级或层级较浅的未分组节点不出现在 CSV 中，因此合计对应当前层级覆盖的节点。
 
 CSV 使用 UTF-8 BOM 编码，方便 Excel 识别中文；逗号、引号、换行由标准 CSV 引号规则处理。无需新增 Python 依赖。只修改 `SLASH_COUNTS` 或使用 `--slashes 2` 即可控制本次导出的层级。
 
@@ -473,7 +515,8 @@ for level in report["levels"]:
 `stats.py` 已支持将 `MODEL_PATH` 改为 `.omc`，继续按层级生成 CSV、JSON 和 TXT，并可选匹配 profiling 时间。当前验证的是 DDK 6.1.1.0 生成的未加密 IMOD 文件（256 字节文件头、版本 `0x10000000`）。其他版本、加密文件或没有可识别图定义的文件会报错，不会按字符串猜测计算图。
 
 ```python
-# 在 stats.py 顶部配置，然后照常运行 stats.py
+# 以下为按 name 分层的历史 OMC 验证配置
+HIERARCHY_SOURCE = "name"
 MODEL_PATH = PACKAGE_DIR / "models/mobilenetv3/omc/mobilenetv3-large_224_1.0.omc"
 PROFILE_CSV = PACKAGE_DIR / "models/mobilenetv3/omc/profiling/_20261016_110720_op.csv"
 REPAIR_NAMES = True
@@ -484,7 +527,7 @@ GE_PROTO_PATH = None
 也可以不修改默认配置，在仓库根目录运行：
 
 ```powershell
-python -m onnx_graph.stats onnx_graph/models/mobilenetv3/omc/mobilenetv3-large_224_1.0.omc --slashes 1 2 --profile-csv onnx_graph/models/mobilenetv3/omc/profiling/_20261016_110720_op.csv
+python -m onnx_graph.stats onnx_graph/models/mobilenetv3/omc/mobilenetv3-large_224_1.0.omc --hierarchy-source name --slashes 1 2 --profile-csv onnx_graph/models/mobilenetv3/omc/profiling/_20261016_110720_op.csv
 
 # 单独保存完整 NetworkX 图；也支持 --ge-proto 和 --repair-names
 python -m onnx_graph convert onnx_graph/models/mobilenetv3/omc/mobilenetv3-large_224_1.0.omc onnx_graph/models/mobilenetv3/omc/networkx/mobilenetv3.omc.nx.pkl
@@ -510,7 +553,7 @@ for node_id, data in subgraph.nodes(data=True):
 - 每条边保留输入/输出端口、张量引用和控制依赖。不同图的同名节点不会串联。**各图保留自己的依赖边**，`graph.graph["regions"]` 的 `parent_node_id`、`inputs`、`outputs` 描述 GraphOp 包含关系及边界；这不是把所有 GraphOp 内联后的单层计算图。
 - 节点 `proto` 是完整 GE OpDef 的序列化字节，`attributes` 提供可读属性，`input_tensors/output_tensors` 提供形状、类型和布局；它不是 ONNX NodeProto。`constant_tensor` 记录常量内部的逻辑张量描述，避免误用编译后的 `[1]` 占位输出形状。
 - 图级 `source_bytes` 保留完整原始 OMC，包括权重、编译任务和未知字段；`model_proto`、`schema_bytes`、`regions[*].proto` 保留模型与子图定义。可以使用标准 `pickle.dump/load` 保存完整 NetworkX 对象。提取子图后仍带完整源文件作为元数据，pickle 不会因此缩减为独立可执行模型。
-- `REPAIR_NAMES` 只根据可确认的输入输出描述名称修复显示名称；原始 OpDef 和依赖引用不变。没有名称的节点保留并跳过名称修复、层级分组。统计时另外排除 `Const/Data/NetOutput` 和已展开的 `GraphOp`，避免把常量和容器计为运行算子。
+- 在 `HIERARCHY_SOURCE="name"` 的旧模式下，`REPAIR_NAMES` 只根据可确认的输入输出描述名称修复显示名称；原始 OpDef 和依赖引用不变。没有名称的节点保留并跳过名称修复、层级分组。统计时另外排除 `Const/Data/NetOutput` 和已展开的 `GraphOp`，避免把常量和容器计为运行算子。
 
 **计算量与验证结果：**
 
@@ -609,7 +652,7 @@ python -m unittest discover -s onnx_graph/tests -v
 python -m onnx_graph.verify_mobilenet
 ```
 
-125 个测试通过。新增 10 个别名测试覆盖 JSON 校验、最长前缀及边界、原始模型保留、输出与 input 证据、歧义及重名、缺少输出、profiling 别名匹配、完整流程及全部未匹配节点的打印和保存、CLI 参数；其中 10 个完整流程测试覆盖统计/时间/联合筛选/导出去重及总表衔接、修复名称共用、排除遗留层级 CSV、复用已有统计、统计失败停止、形状假设和可选 profiling、总表零值/部分覆盖、OMC 仅统计分支、自定义 domain 算子计数及指定 CSV 校验；8 个导出去重联动测试覆盖默认开启/关闭、代表清单与最终文件一致、重复运行、只处理本次筛选结果、空选择、解析失败保留、分组/删除失败、越界及文件变化检查、跨层级相似分组；14 个相似度测试覆盖连接顺序、串并联、端口、共享张量、独立分支排列、忽略名称和普通浮点权重、类型/形状/属性差异、控制常量及其上游值、外部权重、WL 特征相同但不同构、未知/动态形状、聚类链式误合并、分层报告与清单迁移、相似模式及失败记录；14 个批量导出测试覆盖严格阈值、AND/OR 联合条件、未知值、分层批量导出与数值结果、前缀边界、名称修复、重复/已有文件保留、文件名冲突、空筛选结果、空 CSV、控制台及清单中的过滤/失败原因、CSV 校验、统计与模型不一致、缺少边界类型时继续处理其他子图；32 个转换测试覆盖完整字段往返、空图名补齐、空图名模型运行 main.py、控制流子图空图名、重复与空名称、无名输入输出算子的跳过及边界保留、多输入/输出、多重边、前缀边界、名称修复歧义、控制流外部依赖、外部与稀疏权重、局部函数、量化元数据等；14 个统计测试覆盖层级分组、修复开关、分组/depthwise 卷积、矩阵乘法与广播、池化/归一化、不同 opset 的 Softmax、动态形状、未知算子、分层 CSV 的算子列/未知值/中文及特殊字符、空层级和报告输出；11 个运行时间测试覆盖多轮均值、多个运行算子映射、修复前后名称、歧义、不完整时间、零值及吞吐率、CSV 数据校验、可选开关和导出；12 个 OMC 测试覆盖嵌套图、区域隔离、多重/控制边、原始信息及 pickle 保留、CLI 转换、空名称和修复、32/64 位分区表、畸形文件、schema 不执行、分层 CSV 和 depthwise/融合计算量。OMC 集成测试需要 DDK GE schema，未提供时会明确跳过；ONNX 测试不依赖 DDK。
+134 个测试通过。新增 8 个 outputs 分层测试覆盖原名保留、逐字节往返、子图数值验证、编辑后层级刷新、多输出共同父层级、缺失/冲突输出、原名时间匹配、空名及重名、完整主流程和诊断、旧 CSV/旧 ONNX 防混用及 CLI；新增 1 个 OMC 测试覆盖输出描述符分层及原名/依赖保留。新增 10 个别名测试覆盖 JSON 校验、最长前缀及边界、原始模型保留、输出与 input 证据、歧义及重名、缺少输出、profiling 别名匹配、完整流程及全部未匹配节点的打印和保存、CLI 参数；其中 10 个完整流程测试覆盖统计/时间/联合筛选/导出去重及总表衔接、修复名称共用、排除遗留层级 CSV、复用已有统计、统计失败停止、形状假设和可选 profiling、总表零值/部分覆盖、OMC 仅统计分支、自定义 domain 算子计数及指定 CSV 校验；8 个导出去重联动测试覆盖默认开启/关闭、代表清单与最终文件一致、重复运行、只处理本次筛选结果、空选择、解析失败保留、分组/删除失败、越界及文件变化检查、跨层级相似分组；14 个相似度测试覆盖连接顺序、串并联、端口、共享张量、独立分支排列、忽略名称和普通浮点权重、类型/形状/属性差异、控制常量及其上游值、外部权重、WL 特征相同但不同构、未知/动态形状、聚类链式误合并、分层报告与清单迁移、相似模式及失败记录；14 个批量导出测试覆盖严格阈值、AND/OR 联合条件、未知值、分层批量导出与数值结果、前缀边界、名称修复、重复/已有文件保留、文件名冲突、空筛选结果、空 CSV、控制台及清单中的过滤/失败原因、CSV 校验、统计与模型不一致、缺少边界类型时继续处理其他子图；32 个转换测试覆盖完整字段往返、空图名补齐、空图名模型运行 main.py、控制流子图空图名、重复与空名称、无名输入输出算子的跳过及边界保留、多输入/输出、多重边、前缀边界、名称修复歧义、控制流外部依赖、外部与稀疏权重、局部函数、量化元数据等；14 个统计测试覆盖层级分组、修复开关、分组/depthwise 卷积、矩阵乘法与广播、池化/归一化、不同 opset 的 Softmax、动态形状、未知算子、分层 CSV 的算子列/未知值/中文及特殊字符、空层级和报告输出；11 个运行时间测试覆盖多轮均值、多个运行算子映射、修复前后名称、歧义、不完整时间、零值及吞吐率、CSV 数据校验、可选开关和导出；13 个 OMC 测试覆盖嵌套图、区域隔离、多重/控制边、原始信息及 pickle 保留、CLI 转换、空名称和修复、32/64 位分区表、畸形文件、schema 不执行、分层 CSV 和 depthwise/融合计算量。OMC 集成测试需要 DDK GE schema，未提供时会明确跳过；ONNX 测试不依赖 DDK。
 
 给定模型结果：241 个节点、279 条依赖边、144 个初始化张量。经过 pickle 保存/加载和 ONNX 恢复后，与原始文件**逐字节一致**。
 

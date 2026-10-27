@@ -129,6 +129,21 @@ class OmcTests(unittest.TestCase):
         report = analyze_subgraphs(self.path, name_aliases={"legacy_1": "root/block_1"}, repair_names=True)
         self.assertEqual(report["levels"][0]["subgraphs"][0]["prefix"], "root/block_1")
 
+    def test_outputs_define_hierarchy_without_changing_ge_names_or_dependencies(self):
+        raw = self.save(self.model("unrelated_runtime_Add"))
+        graph = omc_to_networkx(self.path, hierarchy_source="outputs", repair_names=True)
+        node_id = nodes_by_prefix(graph, "root/block_1")[0]
+        self.assertEqual(graph.nodes[node_id]["name"], "unrelated_runtime_Add")
+        self.assertEqual(graph.graph["source_bytes"], raw)
+        self.assertEqual(graph.graph["rename_report"], [])
+        self.assertIsNone(graph.graph["name_output_mismatches"])
+        self.assertEqual(list(graph.edges), list(omc_to_networkx(self.path).edges))
+        self.assertEqual(graph.nodes[0]["hierarchy"], ())
+        self.assertEqual(graph.graph["output_hierarchy_issues"][0]["outputs"], [""])
+        report = analyze_subgraphs(self.path, [1], hierarchy_source="outputs")
+        self.assertEqual(report["levels"][0]["subgraphs"][0]["node_ids"], [node_id])
+        self.assertEqual(report["nodes"][0]["name"], "unrelated_runtime_Add")
+
     def test_empty_boundary_name_is_preserved_and_ignored(self):
         m = self.model()
         m.graph[0].op[-1].name = ""

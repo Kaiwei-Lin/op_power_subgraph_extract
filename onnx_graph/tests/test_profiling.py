@@ -168,7 +168,7 @@ class ProfilingTests(unittest.TestCase):
         profile = self.profile([["root/block/Add(Add)", 2], ["root/block/Relu(Activation)", 3]])
         for enabled in (True, False):
             output = self.directory / str(enabled)
-            args = [str(source), "--slashes", "1", "2", "--output-dir", str(output)]
+            args = [str(source), "--hierarchy-source", "name", "--slashes", "1", "2", "--output-dir", str(output)]
             args += ["--profile-csv", str(profile)] if enabled else ["--no-profile"]
             with patch.object(stats, "PROFILE_CSV", profile), redirect_stdout(StringIO()):
                 stats.main(args)

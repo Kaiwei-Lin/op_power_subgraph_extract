@@ -19,9 +19,11 @@ from google.protobuf.message import DecodeError
 import onnx
 
 if __package__:
-    from .core import check_name_outputs, load_name_aliases, repair_node_names
+    from .core import check_name_outputs, repair_node_names
+    from .core import _hierarchy_options, _output_hierarchy_issue, _set_node_hierarchy
 else:
-    from core import check_name_outputs, load_name_aliases, repair_node_names
+    from core import check_name_outputs, repair_node_names
+    from core import _hierarchy_options, _output_hierarchy_issue, _set_node_hierarchy
 
 
 _SCHEMA_RELATIVE = Path("tools/tools_ascendc/package/python/opc_tool/ge_ir_pb2.py")
@@ -138,14 +140,15 @@ def _tensor(desc):
             "layout": desc.layout}
 
 
-def omc_to_networkx(source, *, ge_proto_path=None, repair_names=False, name_aliases=None):
+def omc_to_networkx(source, *, ge_proto_path=None, repair_names=False, name_aliases=None,
+                   hierarchy_source="name"):
     """Keep every GE operator, including Const, Data, NetOutput and GraphOp.
 
     Integer IDs are unique across regions. node['proto'] is the full serialized
     GE OpDef, not an ONNX NodeProto. Node names are display labels; dependencies
     always use the original names and ports. Empty names are preserved.
     """
-    aliases = load_name_aliases(name_aliases)
+    repair_names, aliases = _hierarchy_options(hierarchy_source, repair_names, name_aliases)
     path = Path(source)
     raw = path.read_bytes()
     partitions = _partitions(raw)
@@ -162,7 +165,8 @@ def omc_to_networkx(source, *, ge_proto_path=None, repair_names=False, name_alia
                         source_bytes=raw, schema_bytes=schema, schema_path=schema_path,
                         partitions=partitions, model_proto=model.SerializeToString(),
                         regions=[], rename_report=[], warnings=[], name_aliases=aliases,
-                        name_output_mismatches=[])
+                        name_output_mismatches=[] if hierarchy_source == "name" else None,
+                        hierarchy_source=hierarchy_source, repair_names=repair_names, output_hierarchy_issues=[])
 
     def visit(region, parent=None, depth=0):
         if depth > 64:
@@ -191,24 +195,26 @@ def omc_to_networkx(source, *, ge_proto_path=None, repair_names=False, name_alia
                             original_index=node_id, op_type=op.type, domain="ge", region_id=region_id,
                             inputs=tuple(inputs), outputs=tuple(f"{op.name}:{i}" for i in range(len(op.output_desc))),
                             attributes=attrs, input_tensors=tensors_in, output_tensors=tensors_out,
+                            hierarchy_outputs=tuple(d.name for d in op.output_desc),
                             constant_tensor=_tensor(constant.desc) if constant is not None else None,
                             is_container=False)
-        evidence = onnx.helper.make_model(onnx.helper.make_graph([
-            onnx.helper.make_node(op.type, [d.name for d in op.input_desc if d.name],
-                                  [d.name for d in op.output_desc if d.name], name=op.name)
-            for op in region.op], "name_evidence", [], []))
-        report = []
-        if repair_names:
-            evidence, report = repair_node_names(evidence, name_aliases=aliases)
-        issues = check_name_outputs(evidence, name_aliases=aliases, rename_report=report)
-        for issue in issues:
-            issue.update(node_id=ids[issue["node_id"]], region_id=region_id)
-        result.graph["name_output_mismatches"].extend(issues)
-        if repair_names:
-            for node_id, record in zip(ids, report):
-                record["node_id"] = node_id
-                result.nodes[node_id]["name"] = record["new_name"]
-            result.graph["rename_report"].extend(report)
+        if hierarchy_source == "name":
+            evidence = onnx.helper.make_model(onnx.helper.make_graph([
+                onnx.helper.make_node(op.type, [d.name for d in op.input_desc if d.name],
+                                      [d.name for d in op.output_desc if d.name], name=op.name)
+                for op in region.op], "name_evidence", [], []))
+            report = []
+            if repair_names:
+                evidence, report = repair_node_names(evidence, name_aliases=aliases)
+            issues = check_name_outputs(evidence, name_aliases=aliases, rename_report=report)
+            for issue in issues:
+                issue.update(node_id=ids[issue["node_id"]], region_id=region_id)
+            result.graph["name_output_mismatches"].extend(issues)
+            if repair_names:
+                for node_id, record in zip(ids, report):
+                    record["node_id"] = node_id
+                    result.nodes[node_id]["name"] = record["new_name"]
+                result.graph["rename_report"].extend(report)
         for node_id, op in zip(ids, region.op):
             for port, ref in enumerate(op.input):
                 if not ref:
@@ -240,8 +246,11 @@ def omc_to_networkx(source, *, ge_proto_path=None, repair_names=False, name_alia
         visit(region)
     hierarchy = defaultdict(list)
     for node_id, data in result.nodes(data=True):
-        parts = tuple(p for p in data["name"].split("/") if p) if data["name"].strip() else ()
-        data.update(hierarchy=parts, scope="/".join(parts[:-1]))
+        parts = _set_node_hierarchy(data, hierarchy_source, data["hierarchy_outputs"])
+        if data["hierarchy_reason"]:
+            issue = _output_hierarchy_issue(node_id, data, data["hierarchy_outputs"])
+            issue["region_id"] = data["region_id"]
+            result.graph["output_hierarchy_issues"].append(issue)
         hierarchy[""].append(node_id)
         for end in range(1, len(parts) + 1):
             hierarchy["/".join(parts[:end])].append(node_id)
@@ -338,6 +347,7 @@ def statistics_nodes(graph):
             continue
         record = {"node_id": node_id, "name": data["name"], "original_name": data["original_name"],
                   "operator": data["op_type"], "hierarchy": list(data["hierarchy"]),
+                  "hierarchy_path": data["hierarchy_path"], "hierarchy_reason": data["hierarchy_reason"],
                   "region_id": data["region_id"], "inputs": data["input_tensors"],
                   "outputs": data["output_tensors"]}
         try:

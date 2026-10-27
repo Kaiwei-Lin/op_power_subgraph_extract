@@ -60,6 +60,47 @@ def _tensor_stem(name: str) -> str:
     return re.sub(r"(?:_output_\d+|:\d+)$", "", name)
 
 
+def _hierarchy_options(source, repair_names, name_aliases):
+    if source not in {"name", "outputs"}:
+        raise ValueError("hierarchy_source 必须为 'name' 或 'outputs'")
+    # outputs 分层完全独立于名称修复，原始 name 继续用于 profiling 和导出。
+    return (False, {}) if source == "outputs" else (repair_names, load_name_aliases(name_aliases))
+
+
+def _output_hierarchy(outputs):
+    names = [t for t in outputs if t]
+    if not names:
+        return (), "missing_outputs"
+    if not any("/" in t for t in names):
+        return (), "no_output_path"
+    paths = {tuple(p for p in _tensor_stem(t).split("/") if p) for t in names}
+    common = []
+    for components in zip(*paths):
+        if len(set(components)) != 1:
+            break
+        common.append(components[0])
+    if not common:
+        return (), "conflicting_output_paths"
+    return tuple(common), "common_output_scope" if len(paths) > 1 else ""
+
+
+def _set_node_hierarchy(data, source, outputs):
+    if source == "outputs":
+        parts, reason = _output_hierarchy(outputs)
+    else:
+        parts = tuple(p for p in data["name"].split("/") if p) if data["name"].strip() else ()
+        reason = ""
+    data.update(hierarchy=parts, hierarchy_path="/".join(parts), hierarchy_reason=reason,
+                scope="/".join(parts if reason == "common_output_scope" else parts[:-1]))
+    return parts
+
+
+def _output_hierarchy_issue(node_id, data, outputs):
+    return dict(node_id=node_id, op_type=data["op_type"], original_name=data.get("original_name", data["name"]),
+                name=data["name"], outputs=list(outputs), hierarchy_path=data["hierarchy_path"],
+                reason=data["hierarchy_reason"])
+
+
 def _name_candidate(node: NodeProto, aliases) -> tuple[list[str], str]:
     outputs = {_tensor_stem(t) for t in node.output if "/" in t}
     names = list(dict.fromkeys([_flat(node.name), _alias_flat(node.name, aliases)]))
@@ -121,6 +162,20 @@ def format_name_output_mismatches(issues):
         lines += [f"[node {r['node_id']}] {r['op_type']}: {r['reason']}",
                   f"  original_name: {r['original_name']!r}", f"  name: {r['name']!r}",
                   "  outputs: " + json.dumps(r["outputs"], ensure_ascii=False)]
+    return "\n".join(lines)
+
+
+def format_hierarchy_diagnostics(report):
+    if report.get("hierarchy_source", "name") == "name":
+        return format_name_output_mismatches(report.get("name_output_mismatches"))
+    issues = report.get("output_hierarchy_issues")
+    if issues is None:
+        return "输出层级未检查：本次没有选中的待导出子图。"
+    lines = [f"层级来源: outputs；保留原始 name。输出层级需关注: {len(issues)} 个节点"]
+    for r in issues:
+        lines += [f"[node {r['node_id']}] {r['op_type']}: {r['reason']}",
+                  f"  name: {r['name']!r}", "  outputs: " + json.dumps(r["outputs"], ensure_ascii=False),
+                  f"  hierarchy_path: {r['hierarchy_path']!r}"]
     return "\n".join(lines)
 
 
@@ -200,14 +255,18 @@ def refresh_graph(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
         graph = graph.copy()
     producers = {}
     hierarchy = defaultdict(list)
+    source = graph.graph.get("hierarchy_source", "name")
+    _hierarchy_options(source, False, None)
+    output_issues = []
     graph.remove_edges_from(list(graph.edges(keys=True)))
     for node_id, data in graph.nodes(data=True):
         node = data["proto"]
-        parts = tuple(part for part in node.name.split("/") if part) if node.name.strip() else ()
         data.update(name=node.name, op_type=node.op_type, domain=node.domain,
                     inputs=tuple(node.input), outputs=tuple(node.output),
-                    attributes=tuple(node.attribute), doc_string=node.doc_string,
-                    hierarchy=parts, scope="/".join(parts[:-1]))
+                    attributes=tuple(node.attribute), doc_string=node.doc_string)
+        parts = _set_node_hierarchy(data, source, node.output)
+        if data["hierarchy_reason"]:
+            output_issues.append(_output_hierarchy_issue(node_id, data, node.output))
         hierarchy[""].append(node_id)
         for end in range(1, len(parts) + 1):
             hierarchy["/".join(parts[:end])].append(node_id)
@@ -224,18 +283,21 @@ def refresh_graph(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
                 graph.add_edge(source, target, tensor=tensor, input_index=input_index,
                                output_index=output_index, implicit=input_index is None)
     graph.graph["hierarchy"] = dict(hierarchy)
+    graph.graph["output_hierarchy_issues"] = output_issues
     return graph
 
 
 def onnx_to_networkx(source: str | Path | ModelProto, *, repair_names: bool = False,
-                    name_aliases=None) -> nx.MultiDiGraph:
+                    name_aliases=None, hierarchy_source="name") -> nx.MultiDiGraph:
     """One integer-ID vertex per ONNX operator; one edge per input connection.
 
     graph.graph['model'] holds all ModelProto/GraphProto fields, initializers,
     value_info and local functions. Every vertex holds its complete NodeProto.
     Loading a path also loads external tensor data, making the result portable.
+    hierarchy_source='outputs' preserves node names and derives hierarchy from
+    output paths; name repair and aliases apply only to the legacy 'name' mode.
     """
-    aliases = load_name_aliases(name_aliases)
+    repair_names, aliases = _hierarchy_options(hierarchy_source, repair_names, name_aliases)
     model = deepcopy(source) if isinstance(source, ModelProto) else onnx.load(str(source))
     original_names = [n.name for n in model.graph.node]
     report = []
@@ -243,8 +305,10 @@ def onnx_to_networkx(source: str | Path | ModelProto, *, repair_names: bool = Fa
         model, report = repair_node_names(model, name_aliases=aliases)
     graph = nx.MultiDiGraph()
     graph.graph.update(model=model, original_node_ids=tuple(range(len(model.graph.node))),
-                       rename_report=report, name_aliases=aliases,
-                       name_output_mismatches=check_name_outputs(model, name_aliases=aliases, rename_report=report))
+                       rename_report=report, name_aliases=aliases, hierarchy_source=hierarchy_source,
+                       repair_names=repair_names,
+                       name_output_mismatches=(check_name_outputs(model, name_aliases=aliases, rename_report=report)
+                                               if hierarchy_source == "name" else None))
     for index, node in enumerate(model.graph.node):
         graph.add_node(index, proto=deepcopy(node), original_name=original_names[index], original_index=index)
     return refresh_graph(graph)

@@ -176,7 +176,7 @@ class StatisticsTests(unittest.TestCase):
             onnx.save(m, source)
             raw = source.read_bytes()
             with redirect_stdout(StringIO()):
-                main([str(source), "--slashes", "1", "2", "--no-repair-names",
+                main([str(source), "--hierarchy-source", "name", "--slashes", "1", "2", "--no-repair-names",
                       "--no-batch-assumption", "--input-shape", "x=2,3", "--output-dir", str(directory)])
             report = json.loads((directory / "stats.json").read_text(encoding="utf-8"))
             text = (directory / "stats.txt").read_text(encoding="utf-8")

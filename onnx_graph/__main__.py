@@ -9,7 +9,7 @@ import pickle
 import onnx
 
 from .core import extract_prefix, networkx_to_onnx, onnx_to_networkx, repair_node_names
-from .core import check_name_outputs, load_name_aliases
+from .core import check_name_outputs, _hierarchy_options
 from .omc import omc_to_networkx
 
 
@@ -29,6 +29,8 @@ def main():
             cmd.add_argument("--prefix", required=True)
         if command in ("convert", "extract"):
             cmd.add_argument("--repair-names", action="store_true")
+            cmd.add_argument("--hierarchy-source", choices=("name", "outputs"), default="name",
+                             help="outputs: use output paths as hierarchy and preserve original node names")
         if command != "restore":
             cmd.add_argument("--name-aliases", type=Path, help="JSON prefix aliases: {old: new}")
         if command == "convert":
@@ -37,7 +39,8 @@ def main():
             cmd.add_argument("--report", type=Path, help="JSON report (default: destination.rename.json)")
     args = parser.parse_args()
     try:
-        aliases = load_name_aliases(getattr(args, "name_aliases", None))
+        _, aliases = _hierarchy_options(getattr(args, "hierarchy_source", "name"), False,
+                                       getattr(args, "name_aliases", None))
     except ValueError as exc:
         parser.error(str(exc))
     if args.source.resolve() == args.destination.resolve():
@@ -62,9 +65,9 @@ def main():
         onnx.checker.check_model(model)
     else:
         graph = (omc_to_networkx(args.source, repair_names=args.repair_names, ge_proto_path=args.ge_proto,
-                                 name_aliases=aliases)
+                                 name_aliases=aliases, hierarchy_source=args.hierarchy_source)
                  if is_omc else onnx_to_networkx(args.source, repair_names=args.repair_names,
-                                                name_aliases=aliases))
+                                                name_aliases=aliases, hierarchy_source=args.hierarchy_source))
         issues = graph.graph["name_output_mismatches"]
         if args.command == "extract":
             graph = extract_prefix(graph, args.prefix)
@@ -83,6 +86,9 @@ def main():
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
             summary["rename_status"] = dict(Counter(r["status"] for r in report))
+    if args.command != "repair-names":
+        summary.update(hierarchy_source=graph.graph.get("hierarchy_source", "name"),
+                       output_hierarchy_issues=graph.graph.get("output_hierarchy_issues", []))
     print(json.dumps(dict(destination=str(args.destination), name_output_mismatches=issues, **summary),
                      ensure_ascii=False, indent=2))
 

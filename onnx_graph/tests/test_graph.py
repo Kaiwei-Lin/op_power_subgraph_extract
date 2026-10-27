@@ -108,7 +108,7 @@ class ConversionTests(unittest.TestCase):
             source = directory / "source.onnx"
             output = directory / "result"
             onnx.save(m, source)
-            with patch.multiple(example, MODEL_PATH=source, PREFIX="root/block_1",
+            with patch.multiple(example, HIERARCHY_SOURCE="name", MODEL_PATH=source, PREFIX="root/block_1",
                                 REPAIR_NAMES=False, OUTPUT_DIR=output,
                                 BATCH_FROM_STATS=False), redirect_stdout(StringIO()):
                 example.main()

@@ -11,11 +11,11 @@ from pathlib import Path
 import onnx
 
 if __package__:
-    from .core import _fill_graph_names, format_name_output_mismatches, load_name_aliases, onnx_to_networkx
+    from .core import _fill_graph_names, _hierarchy_options, format_hierarchy_diagnostics, onnx_to_networkx
     from .profiling import attach_profile, time_totals
     from .omc import omc_to_networkx, statistics_nodes
 else:
-    from core import _fill_graph_names, format_name_output_mismatches, load_name_aliases, onnx_to_networkx
+    from core import _fill_graph_names, _hierarchy_options, format_hierarchy_diagnostics, onnx_to_networkx
     from profiling import attach_profile, time_totals
     from omc import omc_to_networkx, statistics_nodes
 
@@ -24,6 +24,7 @@ else:
 PACKAGE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = PACKAGE_DIR / "models/handfree_ainr/handfree_ainr.onnx"
 REPAIR_NAMES = True
+HIERARCHY_SOURCE = "outputs"  # outputs: 保留原始 name；name: 使用旧的名称分层及修复。
 NAME_ALIASES_JSON = None  # 可选：PACKAGE_DIR / "name_aliases.json"
 SLASH_COUNTS = [1, 2]  # 1: root/block；2: root/block/layer；前导 / 不计数
 BATCH_SIZE = 1  # 仅将输入的未知第 0 维视为 batch；设 None 可禁用这一假设
@@ -38,7 +39,7 @@ CONVENTIONS = [
     "卷积按完整卷积核计数（包括 padding）；池化按完整窗口近似，边界实际操作数可能较少。",
     "形状/索引/数据搬移算子按 0 FLOPs 计；这不代表无内存开销或无耗时。",
     "仅统计主图节点；控制流、未支持的算子及缺失形状记为未知，不计为零。",
-    "每个层级单独分组；跨层级的结果包含重复节点，不可相加。浅层名称及无名节点列为未分组。",
+    "每个层级单独分组；跨层级的结果包含重复节点，不可相加。层级过浅或无可用层级的节点列为未分组。",
 ]
 
 _MOVEMENT_OPS = {
@@ -231,9 +232,9 @@ def _totals(nodes, include_time=False):
 
 def analyze_subgraphs(source, slash_counts=(1, 2), *, repair_names=True,
                       batch_size=None, input_shapes=None, profile_csv=None, ge_proto_path=None,
-                      name_aliases=None):
+                      name_aliases=None, hierarchy_source="name"):
     """统计每个层级的互不重叠前缀分组；按扩展名识别 OMC/OM。"""
-    aliases = load_name_aliases(name_aliases)
+    repair_names, aliases = _hierarchy_options(hierarchy_source, repair_names, name_aliases)
     counts = list(dict.fromkeys(slash_counts))
     if not counts or any(type(k) is not int or k < 0 for k in counts):
         raise ValueError("slash_counts 必须包含至少一个非负整数")
@@ -244,7 +245,7 @@ def analyze_subgraphs(source, slash_counts=(1, 2), *, repair_names=True,
         if input_shapes:
             raise ValueError("OMC 使用编译时的张量形状，不支持 --input-shape 覆盖；请重新编译模型")
         graph = omc_to_networkx(source, repair_names=repair_names, ge_proto_path=ge_proto_path,
-                               name_aliases=aliases)
+                               name_aliases=aliases, hierarchy_source=hierarchy_source)
         nodes, excluded = statistics_nodes(graph)
         graph_name = graph.graph["name"]
         root_regions = {r["region_id"] for r in graph.graph["regions"] if r["parent_node_id"] is None}
@@ -263,7 +264,8 @@ def analyze_subgraphs(source, slash_counts=(1, 2), *, repair_names=True,
                         "excluded_operator_counts": dict(Counter(graph.nodes[i]["op_type"] for i in excluded)),
                         "regions": [{k: v for k, v in r.items() if k != "proto"} for r in graph.graph["regions"]]}
     else:
-        graph = onnx_to_networkx(source, repair_names=repair_names, name_aliases=aliases)
+        graph = onnx_to_networkx(source, repair_names=repair_names, name_aliases=aliases,
+                                hierarchy_source=hierarchy_source)
         model = graph.graph["model"]
         graph_name = model.graph.name
         info, inputs, assumptions, warnings = _infer(model, input_shapes or {}, batch_size)
@@ -274,6 +276,7 @@ def analyze_subgraphs(source, slash_counts=(1, 2), *, repair_names=True,
             record = {"node_id": node_id, "name": node.name, "original_name": data["original_name"],
                       "operator": f"{node.domain}::{node.op_type}" if node.domain else node.op_type,
                       "hierarchy": list(data["hierarchy"]),
+                      "hierarchy_path": data["hierarchy_path"], "hierarchy_reason": data["hierarchy_reason"],
                       "inputs": [{"name": x, **info.get(x, {})} for x in node.input if x],
                       "outputs": [{"name": x, **info.get(x, {})} for x in node.output if x]}
             try:
@@ -283,14 +286,18 @@ def analyze_subgraphs(source, slash_counts=(1, 2), *, repair_names=True,
             nodes.append(record)
     include_time = profile_csv is not None
     profile = attach_profile(nodes, profile_csv, name_aliases=aliases) if include_time else None
+    if profile is not None and hierarchy_source == "outputs":
+        profile["conventions"].append("outputs 只用于层级；时间按原始 node.name 匹配，不使用输出路径或 JSON 别名。")
     levels = []
     for count in counts:
         groups = defaultdict(list)
-        unnamed, shallow = [], []
+        unnamed, unscoped, shallow = [], [], []
         for node in nodes:
             parts = node["hierarchy"]
             if not parts:
-                unnamed.append(node["node_id"])
+                unscoped.append(node["node_id"])
+                if not node["name"].strip():
+                    unnamed.append(node["node_id"])
             elif len(parts) <= count:
                 shallow.append(node["node_id"])
             else:
@@ -299,12 +306,13 @@ def analyze_subgraphs(source, slash_counts=(1, 2), *, repair_names=True,
                       **_totals(members, include_time)} for prefix, members in sorted(groups.items())]
         levels.append({"slash_count": count, "subgraph_count": len(subgraphs),
                        "grouped_node_count": sum(g["node_count"] for g in subgraphs),
-                       "unnamed_node_ids": unnamed, "shallower_node_ids": shallow,
+                       "unnamed_node_ids": unnamed, "unscoped_node_ids": unscoped, "shallower_node_ids": shallow,
                        "subgraphs": subgraphs})
     report = {"source": str(Path(source).resolve()) if isinstance(source, (str, Path)) else "<ModelProto>",
             "source_format": "OMC" if is_omc else "ONNX",
             "graph_name": graph_name, "repair_names": repair_names,
             "name_aliases": aliases, "name_output_mismatches": graph.graph["name_output_mismatches"],
+            "hierarchy_source": hierarchy_source, "output_hierarchy_issues": graph.graph["output_hierarchy_issues"],
             "rename_report": graph.graph.get("rename_report", []), "inputs": inputs,
             "assumptions": assumptions, "warnings": warnings, "conventions": conventions,
             "total": _totals(nodes, include_time), "levels": levels, "nodes": nodes, **extra}
@@ -333,7 +341,7 @@ def format_report(report):
     if report["rename_report"]:
         statuses = Counter(x["status"] for x in report["rename_report"])
         lines += [f"名称处理: {dict(statuses)}（详细记录见 JSON）"]
-    lines += ["", format_name_output_mismatches(report.get("name_output_mismatches", []))]
+    lines += ["", format_hierarchy_diagnostics(report)]
     if "profile" in report:
         profile = report["profile"]
         lines += ["", f"运行时间 CSV: {profile['source']}",
@@ -345,7 +353,8 @@ def format_report(report):
     for level in report["levels"]:
         lines += ["", f"前缀含 {level['slash_count']} 个 /：{level['subgraph_count']} 个子图，"
                   f"覆盖 {level['grouped_node_count']} 个节点；"
-                  f"未分组：无名 {len(level['unnamed_node_ids'])}，名称较浅 {len(level['shallower_node_ids'])}"]
+                  f"未分组：无可用层级 {len(level.get('unscoped_node_ids', level['unnamed_node_ids']))}，"
+                  f"层级较浅 {len(level['shallower_node_ids'])}"]
         for i, group in enumerate(level["subgraphs"], 1):
             lines += [f"{i}. {group['prefix']}",
                       f"   节点数: {group['node_count']}；算子: {ops(group)}",
@@ -359,8 +368,8 @@ def format_report(report):
                 lines += [f"   exec_time: {duration} us；已知部分: {group['known_exec_time']:.6f} us；"
                           f"时间匹配节点: {group['exec_time_matched_nodes']}/{group['node_count']}",
                           f"   算术强度（FLOPs/exec_time）: {ratio} FLOPs/us"]
-        for label, key in [("无名", "unnamed_node_ids"), ("名称较浅", "shallower_node_ids")]:
-            if level[key]:
+        for label, key in [("无可用层级", "unscoped_node_ids"), ("层级较浅", "shallower_node_ids")]:
+            if level.get(key):
                 lines += [f"  未分组（{label}）节点 ID: {level[key]}"]
     unknown = [n for n in report["nodes"] if n["flops"] is None]
     if unknown:
@@ -382,6 +391,8 @@ def write_csv_reports(report, output_dir):
     if include_time:
         headers += ["exec_time", "exec_time_unit", "算术强度", "算术强度单位", "已知exec_time",
                     "时间匹配节点数", "时间未匹配节点数"]
+    if report.get("hierarchy_source") == "outputs":
+        headers.append("层级来源")
     paths = []
     for level in report["levels"]:
         path = output / f"stats_{level['slash_count']}_slash.csv"
@@ -402,6 +413,8 @@ def write_csv_reports(report, output_dir):
                     row += [group["exec_time"], "us", group["arithmetic_intensity"], "FLOPs/us",
                             group["known_exec_time"], group["exec_time_matched_nodes"],
                             len(group["exec_time_missing_node_ids"])]
+                if report.get("hierarchy_source") == "outputs":
+                    row.append("outputs")
                 writer.writerow(row)
         paths.append(path)
     return paths
@@ -415,6 +428,8 @@ def write_reports(report, output_dir):
     (output / "stats.txt").write_text(format_report(report), encoding="utf-8")
     (output / "name_output_mismatches.json").write_text(
         json.dumps(report.get("name_output_mismatches", []), ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "output_hierarchy_issues.json").write_text(
+        json.dumps(report.get("output_hierarchy_issues", []), ensure_ascii=False, indent=2), encoding="utf-8")
     return write_csv_reports(report, output)
 
 
@@ -424,6 +439,8 @@ def main(argv=None):
     parser.add_argument("--slashes", type=int, nargs="+", default=SLASH_COUNTS,
                         help="前缀中 / 的数量，不包括前导 /；例如 --slashes 1 2")
     parser.add_argument("--repair-names", action=argparse.BooleanOptionalAction, default=REPAIR_NAMES)
+    parser.add_argument("--hierarchy-source", choices=("outputs", "name"), default=HIERARCHY_SOURCE,
+                        help="outputs 按输出路径分层并保留原名；name 使用旧的名称分层")
     parser.add_argument("--name-aliases", type=Path, default=NAME_ALIASES_JSON,
                         help="可选 JSON 前缀别名：{旧前缀: 新前缀}")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
@@ -448,7 +465,8 @@ def main(argv=None):
     try:
         report = analyze_subgraphs(args.model, args.slashes, repair_names=args.repair_names,
                                    batch_size=args.batch_size, input_shapes=shapes, profile_csv=args.profile_csv,
-                                   ge_proto_path=args.ge_proto, name_aliases=args.name_aliases)
+                                   ge_proto_path=args.ge_proto, name_aliases=args.name_aliases,
+                                   hierarchy_source=args.hierarchy_source)
     except ValueError as exc:
         parser.error(str(exc))
     suffix = "_omc_stats" if report["source_format"] == "OMC" else "_stats"

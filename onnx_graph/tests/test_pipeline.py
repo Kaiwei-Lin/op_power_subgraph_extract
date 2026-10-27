@@ -41,7 +41,7 @@ class PipelineTests(unittest.TestCase):
                     writer.writerow([node.name, value])
 
     def run_main(self, **overrides):
-        settings = dict(MODEL_PATH=self.source, STATS_DIR=self.stats, OUTPUT_DIR=self.output,
+        settings = dict(HIERARCHY_SOURCE="name", MODEL_PATH=self.source, STATS_DIR=self.stats, OUTPUT_DIR=self.output,
                         BATCH_FROM_STATS=True, GENERATE_STATS=True, SLASH_COUNTS=[1, 2],
                         PROFILE_CSV=self.profile, REPAIR_NAMES=True, BATCH_SIZE=1, INPUT_SHAPES={},
                         GE_PROTO_PATH=None, KEEP_REPRESENTATIVES_ONLY=True, GROUP_MODE="exact",
