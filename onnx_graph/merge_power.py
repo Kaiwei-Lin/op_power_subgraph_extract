@@ -9,6 +9,8 @@
 通用模式需要同目录的 compiled_stats.py、stats.py、omc.py 等解析模块。
 每个 OMC 按整个编译后运算图统计，输出算子数量、理论 FLOPs 和逐算子数据转移量。
 CSV 功耗读取 Channel/Power，取表头后前 12 条非空数据行，保留原值及单位。
+运行时长读取功耗文件 H1，单位 s；数据移动吞吐=完整转移字节数/时长，单位 B/s。
+时长缺失、无效、为零或数据量不完整时，吞吐量保持空白。
 兼容同号 XLSX；仅读取 Excel 时需要 python -m pip install openpyxl。
 
 旧 --summary 模式：
@@ -396,15 +398,58 @@ def merge_power(summary_path, power_dir, output_path=None, *, stats_dir=None):
     return output_path, channels
 
 
-def read_power_csv(path):
-    """沿用平均值表的 Channel/Power 及前 12 行；保留单位，不对重复 Channel 猜测求均值。"""
+def _power_csv_rows(path):
     raw = Path(path).read_bytes()
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         text = raw.decode("gb18030")
     import io
-    rows = list(csv.reader(io.StringIO(text)))
+    return list(csv.reader(io.StringIO(text)))
+
+
+def read_runtime_seconds(path):
+    """读取 CSV 第一行第八列或选中平均值 sheet 的 H1；缺失返回 None，单位为秒。"""
+    path = Path(path)
+    if path.suffix.lower() == ".csv":
+        rows = _power_csv_rows(path)
+        value = rows[0][7] if rows and len(rows[0]) > 7 else None
+    else:
+        if load_workbook is None:
+            raise ValueError("读取 XLSX 时长需要 openpyxl")
+        with path.open("rb") as stream:
+            book = load_workbook(stream, read_only=True, data_only=True)
+            try:
+                name = next((n for n in (SHEET_NAME, FALLBACK_SHEET_NAME) if n in book.sheetnames), None)
+                if name is None:
+                    raise ValueError(f"{path.name}: 找不到平均值 sheet，无法读取 H1")
+                sheet = book[name]
+                sheet.reset_dimensions()
+                cell = sheet.cell(row=1, column=8)
+                if cell.data_type == "e":
+                    raise ValueError(f"{path.name}: H1 为 Excel 错误值")
+                value = cell.value
+            finally:
+                book.close()
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{path.name}: H1 时长不是有效数值")
+    try:
+        seconds = Decimal(str(value).strip())
+    except InvalidOperation as error:
+        raise ValueError(f"{path.name}: H1 时长不是秒数：{value!r}") from error
+    if not seconds.is_finite() or seconds < 0:
+        raise ValueError(f"{path.name}: H1 时长必须为有限非负秒数")
+    result = float(seconds)
+    if not math.isfinite(result) or (seconds != 0 and result == 0):
+        raise ValueError(f"{path.name}: H1 时长超出可表示范围")
+    return result
+
+
+def read_power_csv(path):
+    """沿用平均值表的 Channel/Power 及前 12 行；保留单位，不对重复 Channel 猜测求均值。"""
+    rows = _power_csv_rows(path)
     headers = []
     for index, row in enumerate(rows):
         fields = [str(x).strip().lower() for x in row]
@@ -476,12 +521,16 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
             raise ValueError(f"统计期间 OMC 文件发生变化：{item['OMC相对路径']}")
         row.update(item)
         row.update(功耗文件="", 功耗状态="missing", 功耗原因="尚未提供功耗目录")
+        row.update(运行时长=None, 运行时长单位="s", 时长状态="missing", 时长原因="尚未提供功耗目录",
+                   数据移动吞吐=None, 数据移动吞吐单位="B/s")
         if powers_root is not None:
             candidates = [p for suffix in (".csv", ".xlsx") if (p := powers_root / f"{item['编号']}{suffix}").is_file()]
             if not candidates:
                 row["功耗原因"] = f"缺少 {item['编号']}.csv（或 .xlsx），未知功耗不补零"
+                row["时长原因"] = f"缺少 {item['编号']}.csv（或 .xlsx），未读取 H1"
             elif len(candidates) > 1:
                 row.update(功耗状态="ambiguous", 功耗原因="同一编号同时存在 CSV 和 XLSX，请保留一个对应文件")
+                row.update(时长状态="ambiguous", 时长原因="同一编号同时存在 CSV 和 XLSX，无法确定时长来源")
             else:
                 path = candidates[0]
                 row["功耗文件"] = str(path)
@@ -494,6 +543,18 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
                     row.update(功耗状态="ok", 功耗原因="")
                 except (OSError, ValueError, BadZipFile, InvalidFileException) as error:
                     row.update(功耗状态="failed", 功耗原因=str(error))
+                try:
+                    seconds = read_runtime_seconds(path)
+                    if seconds is None:
+                        row["时长原因"] = "H1 为空或缺少第一行第八列；若为公式，请先计算并保存"
+                    else:
+                        row.update(运行时长=seconds, 时长状态="ok", 时长原因="")
+                        amount = row.get("OMC_数据转移字节数")
+                        if amount is not None and amount != "" and seconds > 0:
+                            rate = amount / seconds
+                            row["数据移动吞吐"] = rate if math.isfinite(rate) else None
+                except (OSError, ValueError, BadZipFile, InvalidFileException) as error:
+                    row.update(时长状态="failed", 时长原因=str(error))
         rows.append(row)
     for row in rows:
         if row["功耗状态"] == "ok" and any(c not in row for c in channels):
@@ -511,6 +572,7 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
     result = dict(batch_dir=str(root), power_dir=str(powers_root) if powers_root is not None else None,
                   source_format="OMC", numbering_rule="slash 数字升序、文件名忽略大小写升序；从 1 开始",
                   omc_counts=compiled["counts"], power_counts=dict(Counter(r["功耗状态"] for r in rows)),
+                  runtime_counts=dict(Counter(r["时长状态"] for r in rows)),
                   unused_power_files=unused_power, records=rows)
     (output / "summary.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
@@ -538,7 +600,7 @@ def main():
         except (OSError, ValueError) as error:
             print(f"合并失败：{error}", file=sys.stderr)
             return 1
-        print(f"OMC: {result['omc_counts']}；功耗: {result['power_counts']}")
+        print(f"OMC: {result['omc_counts']}；功耗: {result['power_counts']}；时长: {result['runtime_counts']}")
         print(f"编号表：{Path(output).resolve() / 'numbering.csv'}")
         print(f"总表：{Path(output).resolve() / 'summary.csv'}")
         return 0

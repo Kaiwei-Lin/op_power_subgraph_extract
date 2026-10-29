@@ -48,6 +48,13 @@ class BatchPowerTests(unittest.TestCase):
         return merge.merge_compiled_power(self.models, self.powers, self.output,
                                            ge_proto_path=self.schema_path, **kwargs)
 
+    def set_csv_runtime(self, path, value):
+        with path.open(encoding="utf-8-sig", newline="") as stream:
+            rows = list(csv.reader(stream))
+        rows[0] = ["metadata", "", "", "", "", "", "not the duration", value]
+        with path.open("w", encoding="utf-8-sig", newline="") as stream:
+            csv.writer(stream).writerows(rows)
+
     def test_numbering_uses_numeric_slash_and_case_insensitive_names(self):
         names = ["slash_2/sg_a.omc", "slash_10/sg_a.omc", "slash0/sg_Gemm.omc",
                  "slash0/sg_encoder.omc", "slash0/sg_decoder.omc", "slash_1/sg_a.omc"]
@@ -126,6 +133,83 @@ class BatchPowerTests(unittest.TestCase):
         powers = merge.read_power_csv(path)
         self.assertEqual(len(powers), 12)
         self.assertNotIn("CH_12", powers)
+
+    def test_h1_runtime_and_transfer_throughput_keep_zero_and_missing_distinct(self):
+        for i in range(3):
+            self.save_model(f"slash_0/sg_{i}.omc")
+            path = self.power_csv(i + 1)
+            if i < 2:
+                self.set_csv_runtime(path, "0.5" if i == 0 else "0")
+        result = self.run_merge()
+        self.assertEqual(result["runtime_counts"], {"ok": 2, "missing": 1})
+        first, zero, missing = result["records"]
+        self.assertEqual(first["运行时长"], 0.5)
+        self.assertEqual(first["数据移动吞吐"], 192)
+        self.assertEqual((first["运行时长单位"], first["数据移动吞吐单位"]), ("s", "B/s"))
+        self.assertEqual(zero["运行时长"], 0)
+        self.assertIsNone(zero["数据移动吞吐"])
+        self.assertIsNone(missing["运行时长"])
+        self.assertIsNone(missing["数据移动吞吐"])
+        with (self.output / "summary.csv").open(encoding="utf-8-sig", newline="") as stream:
+            saved = list(csv.DictReader(stream))
+        self.assertEqual(saved[0]["数据移动吞吐"], "192.0")
+        self.assertEqual(saved[1]["数据移动吞吐"], "")
+        self.assertEqual(saved[2]["运行时长"], "")
+
+    def test_bad_runtime_does_not_discard_power_and_reads_physical_first_csv_row(self):
+        self.save_model("slash_0/sg_a.omc")
+        path = self.power_csv(1)
+        for value in ("-1", "NaN", "inf", "invalid", "1e999", "1e-999"):
+            with self.subTest(value=value):
+                self.set_csv_runtime(path, value)
+                with self.assertRaises(ValueError):
+                    merge.read_runtime_seconds(path)
+        result = self.run_merge()
+        row = result["records"][0]
+        self.assertEqual(row["功耗状态"], "ok")
+        self.assertEqual(row["NPU"], "3.25 mW")
+        self.assertEqual(row["时长状态"], "failed")
+        self.assertIsNone(row["数据移动吞吐"])
+        self.set_csv_runtime(path, "1e-3")
+        self.assertEqual(merge.read_runtime_seconds(path), .001)
+        content = path.read_text(encoding="utf-8-sig")
+        path.write_text("\n" + content, encoding="utf-8-sig")
+        self.assertIsNone(merge.read_runtime_seconds(path))
+
+    def test_incomplete_transfer_is_not_used_for_throughput(self):
+        self.save_model(unknown=True)
+        path = self.power_csv(1)
+        self.set_csv_runtime(path, "2")
+        row = self.run_merge()["records"][0]
+        self.assertEqual(row["运行时长"], 2)
+        self.assertIsNone(row["OMC_数据转移字节数"])
+        self.assertGreater(row["OMC_已知数据转移字节数"], 0)
+        self.assertIsNone(row["数据移动吞吐"])
+
+    def test_xlsx_runtime_uses_h1_from_the_selected_average_sheet(self):
+        try:
+            from openpyxl import Workbook, load_workbook
+        except ImportError:
+            self.skipTest("XLSX 时长测试需要 openpyxl")
+        self.save_model("slash_0/sg_a.omc")
+        path = self.powers / "1.xlsx"
+        book = Workbook()
+        book.active.title = "other"
+        book.active["H1"] = 999
+        sheet = book.create_sheet(merge.SHEET_NAME)
+        sheet["H1"] = 4
+        sheet.append(["DB", "Inst", "Channel", "Current", "Voltage", "Power"])
+        sheet.append(["Work0.db", "inst", "CPU", 1, 1, 2.5])
+        book.save(path)
+        book.close()
+        row = self.run_merge()["records"][0]
+        self.assertEqual((row["运行时长"], row["数据移动吞吐"], row["CPU"]), (4, 24, 2.5))
+        book = load_workbook(path)
+        book[merge.SHEET_NAME]["H1"] = "#VALUE!"
+        book.save(path)
+        book.close()
+        with self.assertRaises(ValueError):
+            merge.read_runtime_seconds(path)
 
     def test_cli_and_existing_output_are_safe(self):
         self.save_model("slash_0/sg_a.omc")
