@@ -29,7 +29,8 @@ else:
 _SCHEMA_RELATIVE = Path("tools/tools_ascendc/package/python/opc_tool/ge_ir_pb2.py")
 _STRUCTURAL = {"Const", "Data", "NetOutput"}
 _MOVEMENT = {"Permute", "TransData", "CastT", "Reshape", "Squeeze", "Unsqueeze",
-             "Flatten", "GatherV2D", "ConcatD", "SplitD", "Identity"}
+             "Flatten", "GatherV2D", "ConcatD", "SplitD", "SplitV", "StridedSliceV2",
+             "ScatterNdUpdate", "Identity"}
 
 
 def _schema(path=None):
@@ -268,15 +269,66 @@ def _shape(tensor):
     return shape
 
 
+def _resolved_inputs(graph, node_id):
+    tensors = [dict(t) for t in graph.nodes[node_id]["input_tensors"]]
+    for upstream, _, edge in graph.in_edges(node_id, data=True):
+        port = edge["input_index"]
+        if edge["control"] or port >= len(tensors) or graph.nodes[upstream]["op_type"] != "Const":
+            continue
+        # Const 的算子输出/消费者 input_desc 常是 [1] 占位，实际权重在 value.t.desc。
+        value = graph.nodes[upstream].get("constant_tensor") if edge["output_index"] == 0 else None
+        value = value or dict(shape=None, dtype="UNKNOWN_CONST", layout="")
+        tensors[port] = {**value, "name": tensors[port]["name"], "metadata_source": "Const.value.t.desc"}
+    return tensors
+
+
 def _cost(graph, node_id):
     data = graph.nodes[node_id]
     op, attrs = data["op_type"], data["attributes"]
     if op in _MOVEMENT:
         return 0, 0, "形状变换、类型转换或数据搬移，按 0 FLOPs 计"
-    inputs, outputs = data["input_tensors"], data["output_tensors"]
+    inputs, outputs = _resolved_inputs(graph, node_id), data["output_tensors"]
     if not inputs or inputs[0]["dtype"] not in {"DT_FLOAT", "DT_FLOAT16", "DT_DOUBLE", "DT_BF16"}:
         raise ValueError("输入不是已知浮点类型；不把量化整数运算当作 FLOPs")
     n = prod(_shape(outputs[0]))
+    if op in {"MatMul", "BatchMatMul", "BatchMatMulV2", "GemmD", "GemmV3"}:
+        if len(inputs) < 2:
+            raise ValueError("矩阵乘法缺少两个输入")
+        if inputs[1]["dtype"] not in {"DT_FLOAT", "DT_FLOAT16", "DT_DOUBLE", "DT_BF16"}:
+            raise ValueError("矩阵权重不是已知浮点类型")
+        a, b, y = _shape(inputs[0]), _shape(inputs[1]), _shape(outputs[0])
+        if len(a) < 2 or len(b) < 2 or len(y) < 2:
+            raise ValueError("矩阵乘法缺少至少二维的逻辑形状")
+        if any(t.get("layout", "").startswith("FRACTAL") and len(shape) > 3
+               for t, shape in ((inputs[0], a), (inputs[1], b), (outputs[0], y))):
+            raise ValueError("无法确认分块矩阵的逻辑 M、K、N，保持计算量未知")
+        transpose = []
+        for keys in (("adj_x1", "transpose_a", "transpose_x1", "transA"),
+                     ("adj_x2", "transpose_b", "transpose_x2", "transB")):
+            values = {attrs[k] for k in keys if k in attrs}
+            if len(values) > 1 or any(v not in (0, 1) for v in values):
+                raise ValueError("矩阵转置属性不一致或无效")
+            transpose.append(bool(next(iter(values), False)))
+        m, k = a[-2:][::-1] if transpose[0] else a[-2:]
+        kb, width = b[-2:][::-1] if transpose[1] else b[-2:]
+        if k != kb or y[-2:] != [m, width]:
+            raise ValueError("矩阵乘法输入/输出的 M、K、N 不一致")
+        length = max(len(a), len(b)) - 2
+        aa, bb = [1] * (length - len(a) + 2) + a[:-2], [1] * (length - len(b) + 2) + b[:-2]
+        if any(x != z and x != 1 and z != 1 for x, z in zip(aa, bb)):
+            raise ValueError("矩阵乘法 batch 无法广播")
+        if y[:-2] != [z if x == 1 else x for x, z in zip(aa, bb)]:
+            raise ValueError("矩阵乘法输出 batch 与输入广播不一致")
+        if attrs.get("alpha", 1) != 1 or attrs.get("beta", 1) not in (0, 1):
+            raise ValueError("暂未估算此矩阵乘法 alpha/beta")
+        bias = op in {"GemmD", "GemmV3"} and len(inputs) > 2 and attrs.get("beta", 1) != 0
+        if bias:
+            c = _shape(inputs[2])
+            if len(c) > len(y) or any(x not in (1, z) for x, z in zip([1] * (len(y) - len(c)) + c, y)):
+                raise ValueError("Gemm 偏置无法广播到输出")
+        macs = n * k
+        return macs, 2 * macs + n * (bias + bool(attrs.get("relu_flag", False))), \
+            "矩阵乘法 MACs=输出元素数×K；FLOPs=2MACs+有效偏置+融合ReLU"
     if attrs.get("alpha", 1) != 1 or attrs.get("beta", 0) != 0:
         raise ValueError("暂未估算非默认 alpha/beta 的融合操作")
     if op == "Convolution":
@@ -307,6 +359,31 @@ def _cost(graph, node_id):
             "逻辑输出元素数×权重(C/group×KH×KW)；FLOPs=2MACs+偏置+融合ReLU"
     if op in {"Add", "Sub", "Mul", "RealDiv", "Div"}:
         return 0, n, "每个逻辑输出元素 1 次运算"
+    if op == "LayerNorm":
+        x = _shape(inputs[0])
+        axis = attrs.get("begin_norm_axis")
+        if (type(axis) is not int or not -len(x) <= axis < len(x)
+                or attrs.get("end_norm_axis", -1) not in (-1, len(x) - 1)
+                or attrs.get("norm_type", "LayerNorm") != "LayerNorm"
+                or _shape(outputs[0]) != x):
+            raise ValueError("LayerNorm 缺少明确的归一化轴或形状")
+        groups = prod(x[:axis % len(x)])
+        width = prod(x[axis % len(x):])
+        if not width:
+            raise ValueError("不估算空集合的 LayerNorm")
+        if any(prod(_shape(t)) not in (1, width) for t in inputs[1:3]):
+            raise ValueError("LayerNorm scale/bias 与归一化宽度不一致")
+        if any(prod(_shape(t)) != groups for t in outputs[1:3]):
+            raise ValueError("LayerNorm mean/variance 与分组数量不一致")
+        return 0, (6 + (len(inputs) > 2)) * n + 3 * groups, "LayerNorm 近似 6N+3组数，有偏置另加 N"
+    if op == "PRelu":
+        x = _shape(inputs[0])
+        fmt = attrs.get("data_format", "NCHW")
+        if len(inputs) < 2 or len(x) < 2 or fmt not in {"NCHW", "NHWC"} or _shape(outputs[0]) != x:
+            raise ValueError("PRelu 缺少有效输入形状或布局")
+        if prod(_shape(inputs[1])) not in {1, x[1] if fmt == "NCHW" else x[-1]}:
+            raise ValueError("PRelu slope 不是标量或逐通道参数")
+        return 0, 2 * n, "PRelu 比较及负分支乘法，按每元素约 2 次标量操作估算"
     if op == "Activation":
         factors = {0: 4, 1: 1, 2: 6, 3: 2, 5: 2, 6: 1, 7: 2, 14: 2}
         mode = attrs.get("mode", 1)
@@ -348,7 +425,7 @@ def statistics_nodes(graph):
         record = {"node_id": node_id, "name": data["name"], "original_name": data["original_name"],
                   "operator": data["op_type"], "hierarchy": list(data["hierarchy"]),
                   "hierarchy_path": data["hierarchy_path"], "hierarchy_reason": data["hierarchy_reason"],
-                  "region_id": data["region_id"], "inputs": data["input_tensors"],
+                  "region_id": data["region_id"], "inputs": _resolved_inputs(graph, node_id),
                   "outputs": data["output_tensors"]}
         try:
             record["macs"], record["flops"], record["formula"] = _cost(graph, node_id)

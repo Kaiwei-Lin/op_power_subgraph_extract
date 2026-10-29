@@ -28,7 +28,7 @@ op_power_subgraph_extract/
 
 ## 直接运行 main.py
 
-已经提供 `onnx_graph/main.py`，可以放在 `onnx_graph` 包内使用。默认一次完成 **生成统计 → 筛选 → 批量导出 → 去重 → 汇总代表时间**，只保留本次分组的代表 ONNX；也保留原来的单前缀示例。无需先单独运行 `stats.py`。默认读取上面的 handfree_ainr 模型和 CSV，路径基于 `__file__` 计算，不依赖启动目录。更新时请同步整个代码包。
+已经提供 `onnx_graph/main.py`，可以放在 `onnx_graph` 包内使用。默认一次完成 **生成统计 → 筛选 → 批量导出 → 去重 → 汇总代表时间**，只保留本次分组的代表 ONNX；也保留原来的单前缀示例。无需先单独运行 `stats.py`。当前 main.py 默认读取 models/mobilenetv3-large_224_1.0.onnx 和同目录的 _20261014_151905_op.csv，路径基于 `__file__` 计算，不依赖启动目录。更新时请同步整个代码包。
 
 在仓库根目录直接运行：
 
@@ -48,7 +48,7 @@ python -m onnx_graph.main
 
 ```python
 PACKAGE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = PACKAGE_DIR / "models/handfree_ainr/handfree_ainr.onnx"
+MODEL_PATH = PACKAGE_DIR / "models/mobilenetv3-large_224_1.0.onnx"
 HIERARCHY_SOURCE = "outputs"  # 默认按输出路径分层，保留原始 name
 REPAIR_NAMES = True  # 仅 HIERARCHY_SOURCE="name" 时生效
 NAME_ALIASES_JSON = None  # 仅 name 模式生效
@@ -57,7 +57,7 @@ BATCH_FROM_STATS = True
 GENERATE_STATS = True  # 默认先生成本次统计，再筛选、导出
 STATS_DIR = MODEL_PATH.parent / "networkx" / (MODEL_PATH.stem + "_stats")
 SLASH_COUNTS = [0, 1, 2, 3]
-PROFILE_CSV = MODEL_PATH.parent / "handfree_ainr_fuse_20261020_102316_op.csv"
+PROFILE_CSV = MODEL_PATH.parent / "_20261014_151905_op.csv"
 # PROFILE_CSV = None  # 不需要时间统计时禁用
 BATCH_SIZE = 1      # 仅用于统计估算；None 禁用未知第 0 维的 batch 假设
 INPUT_SHAPES = {}   # 仅用于统计估算；例如 {"input": [1, 3, 224, 224]}
@@ -509,6 +509,78 @@ for level in report["levels"]:
 
 给定 MobileNetV3 在 batch=1、输入 `[1,224,224,3]` 下：1 个 `/` 的前缀共 **21** 组，2 个 `/` 共 **76** 组，两种分组都覆盖全部 **241** 个节点；估算 **216,591,040 MACs / 449,148,684 FLOPs**，无未知计算量。`MobilenetV3/expanded_conv_1` 包含 `Conv×3, Relu×2`，为 **19,468,288 MACs / 41,018,880 FLOPs**。完整报告位于 `onnx_graph/models/mobilenetv3/networkx/mobilenetv3-large_224_1.0_stats/`。
 
+## 通用 OMC 编号、功耗合并与模型统计
+
+`merge_power.py --batch-dir` 模式直接读取编译后的 OMC，不需要原始 ONNX 或 `representatives_summary.csv`，也不使用旧代码中的 56 个固定编号。不同模型、不同子图数量都使用同一套扫描流程。
+
+```powershell
+# 功耗尚未提供：先生成编号表及 OMC 的算子、数据转移量、FLOPs 统计。
+python -m onnx_graph.merge_power --batch-dir D:/models/networkx/model/batch --output-dir D:/results/model_omc_stats --ge-proto D:/DDK/tools/tools_ascendc/package/python/opc_tool/ge_ir_pb2.py
+
+# 功耗目录到位后：按同号 1.csv、2.csv……合并；沿用首次编号并验证 OMC 内容。
+python -m onnx_graph.merge_power --batch-dir D:/models/networkx/model/batch --power-dir D:/power --numbering D:/results/model_omc_stats/numbering.csv --output-dir D:/results/model_with_power --ge-proto D:/DDK/tools/tools_ascendc/package/python/opc_tool/ge_ir_pb2.py
+```
+
+也可直接运行 `python onnx_graph/merge_power.py` 并传同样的参数。`--ge-proto` 可用环境变量 `ONNX_GRAPH_GE_PROTO` 或 `DDK_PATH` 代替。输出目录必须尚不存在。
+
+编号从 1 开始，先按 `slash_0/slash0`、`slash_1/slash1` 等目录的**数字**升序，再按完整文件名**忽略大小写的字典序**排列；不依赖文件系统遍历顺序。没有 slash 目录的文件排在已分层文件之后。每个 OMC 文件作为一个完整的已编译子图统计，不依赖编译图内部是否保留 `/`。
+
+输出目录包含：
+
+```text
+numbering.csv            # 编号、斜杠数、OMC相对路径、SHA256
+summary.csv              # 按编号排列的模型统计 + 功耗 Channel 列
+summary.json             # 同一份结果、状态/原因，以及没有对应编号的功耗文件
+omc_stats/               # 各个 OMC 的明细 stats.json/txt 及静态统计总表
+```
+
+`numbering.csv` 应与功耗数据一起保留。以后合并时用 `--numbering` 指定它，脚本检查目录中的 OMC 是否完整对应、内容 SHA256 是否相同、编号是否连续且唯一，避免新增或替换模型后误配旧的功耗。首次不提供 `--numbering` 时自动生成编号；有多个编译版本就作为多个文件分别编号，应先整理好待测 batch 目录。
+
+总表包含各模型的 `OMC_<op类型>数量`、节点总数、MACs/FLOPs、已知计算量、数据转移字节数、未知节点数，以及 `功耗文件/功耗状态/功耗原因` 和各 Channel 的 Power。数据转移量按编译后运算节点的全部输入（包含权重和偏置）及输出累加；Const 的 `[1]` 占位输入会用真实 `Const.value.t.desc` 替换。原始 OMC、功耗文件及 `main.py` 配置均不修改。
+
+功耗 CSV 沿用旧平均值表规则：寻找 `Channel` 和 `Power` 表头，可在前面包含元数据行；取其后前 12 条非空数据行，按 Channel 展开到列。多个平均值表优先 `Work0.db`，其次 `Work1.db`；同优先级多表或重复 Channel 报错，不擅自对时间序列求均值。支持 UTF-8/BOM 和 GB18030，Power 的数字文本、`mW/W` 等单位原样保留，不换算单位。也支持同号 `.xlsx` 的原有读取方式（需 openpyxl）；同一编号同时有 CSV 和 XLSX 时标为歧义。
+
+缺失功耗记为 `missing`，读取失败为 `failed`，格式歧义为 `ambiguous`，缺少其他文件已有的 Channel 时为 `incomplete`；未知值保持空白，真实零值仍保留。一个文件失败不妨碍其余模型汇总。目录里没有对应编号的文件（例如 `0.csv`）只列入 `unused_power_files`，不会自动当作整模型测量。本模式不合计不同 slash 层级的功耗或数据量。
+
+GE 矩阵乘法（含批量、转置及已验证的 Gemm 偏置）、LayerNorm、PRelu 等按明确形状和属性估算，1 MAC=2 FLOPs。SplitV、StridedSliceV2、ScatterNdUpdate 等移动/索引算子计 0 FLOPs；它们的数据转移量仍计入。不透明 FusionOpNode 不按名字猜计算量，完整 FLOPs 留空，同时保留已知部分及未知算子数量。这些读写字节为描述符估计，包含逐算子读写，不能替代实际 DDR 流量。
+
+`--summary ... --power-dir ...` 旧功耗合并模式仍保留；新模型应使用上述 `--batch-dir` 模式。更新通用功能需要同步 `merge_power.py`、`compiled_stats.py`、`omc.py` 及原有的解析/统计模块。
+
+## 编译后的子图 OMC 批量统计
+
+完成 ONNX 提取和去重、将各代表子图分别编译为 OMC 后，运行 `compiled_stats.py`。每个 OMC 文件作为一个完整的已编译子图统计，不再依赖内部 `/` 层级，也不在编译图中重新切分。
+
+```powershell
+# 已编译文件可以放在 slash_0、slash_1 等子目录中，会递归查找 .omc/.om。
+python -m onnx_graph.compiled_stats --omc-dir D:/subgraphs/omc --output-dir D:/subgraphs/omc_stats
+
+# 可选：关联原代表总表，保留原前缀、ONNX 统计和时间，追加独立的 OMC 统计列。
+python -m onnx_graph.compiled_stats --omc-dir D:/subgraphs/omc --summary D:/subgraphs/batch/representatives_summary.csv --output-dir D:/subgraphs/omc_stats_v2 --ge-proto D:/DDK/tools/tools_ascendc/package/python/opc_tool/ge_ir_pb2.py
+```
+
+也可以直接运行 `python onnx_graph/compiled_stats.py`，修改文件顶部的 `OMC_DIR`、`SUMMARY_CSV`、`OUTPUT_DIR`、`GE_PROTO_PATH`。该脚本是编译后的独立步骤，不改 `main.py` 的路径、筛选或层级设置。
+
+输出包括：
+
+- `omc_summary.csv`：每个 OMC 一行；提供代表总表时按原表行序输出，并保留找不到或匹配有歧义的行。
+- `omc_summary.json`：同一份结果、匹配状态、错误原因、没有关联到代表总表的 OMC 文件。
+- `models/<模型名和路径摘要>/stats.json`、`stats.txt`：该 OMC 的完整节点信息和整图统计。`source_format=OMC`、`compiled_scope=whole_omc`；`levels=[]` 表示本次不再按内部前缀分组。JSON 的 `data_transfer` 保存整图数据转移量。
+
+总表追加 `OMC文件`、`OMC状态`、`OMC原因`、明细报告路径、文件 SHA256、`OMC_节点数`、各类 `OMC_<op类型>数量`、`OMC_FLOPs`、`OMC_MACs`、已知计算量及未知节点数，以及：
+
+```text
+OMC_输入及权重字节数、OMC_输出字节数、OMC_数据转移字节数、
+OMC_数据转移量完整、OMC_未知数据转移节点数、OMC_已知数据转移字节数
+```
+
+FLOPs 使用现有 GE 算子公式；未支持的算子保留未知值和已知部分。数据转移量复用 `merge_power.py` 的公式：各运算节点全部输入（含权重/偏置）与输出的描述符字节数之和，中间张量的写入和读取分别累计；`Const/Data/NetOutput` 及已展开的 GraphOp 容器不作为运算节点。动态形状或未知类型保持未知，不补零。这是描述符上的逻辑读写量，未模拟缓存、硬件内核和实际 DDR 流量。
+
+传入代表总表时，原来的 `节点数/FLOPs/已知exec_time` 等列不被 OMC 结果覆盖；这些时间仍来自原统计，不能当作子图编译后单独运行的实测耗时。未传入新的 profiling 时，本步骤不生成 OMC 运行时间。
+
+默认按 ONNX 与 OMC 的文件名对应，允许编译后增加 `_fixed` 和 `_fuse_YYYYMMDD_HHMMSS` 后缀；有 `slash_<数字>` 目录时也核对原表的斜杠层级。同一子图有多个编译版本时标记 `ambiguous`，不会自动选最新文件。文件名被改成编号等情况，可在原总表增加 `OMC文件` 列，填写相对于 `--omc-dir` 的路径或绝对路径，显式指定对应关系。目录中没有关联到总表的文件列在 JSON 的 `unused_omc_files`。
+
+`OMC状态` 为 `ok/missing/ambiguous/failed`。某个 OMC 解析失败时记录原因并继续处理其他模型；失败行的算子数量和数值列留空。输出目录必须尚不存在，避免覆盖历史结果。仅读取 OMC 统计时不需要 openpyxl；合并 Excel 功耗时仍需安装它。更新本功能需同步 `compiled_stats.py` 和 `merge_power.py`，以及已有的 `stats.py/omc.py/core.py/profiling.py`；不需要重跑 ONNX 切分。
+
 ## 已验证的结果与复现
 
 ### OMC 输入（实验支持）
@@ -558,7 +630,7 @@ for node_id, data in subgraph.nodes(data=True):
 
 **计算量与验证结果：**
 
-目前估算 GE `Convolution`（含分组、已验证的 depthwise 布局和融合 ReLU）、`Add/Sub/Mul/Div/RealDiv`、常见 `Activation` 模式、`Eltwise`、`PoolingD`、`Softmax`；数据搬移/形状变换算子按 0 FLOPs 计。使用逻辑尺寸，未计入物理通道补齐或内核开销。`GemmV3`、`BatchMatMulV2`、`LayerNorm` 等尚未实现的 GE 算子会保留统计和时间，计算量标为未知，不能套用同名 ONNX 公式。
+目前估算 GE `Convolution`（含分组、已验证的 depthwise 布局和融合 ReLU）、`MatMul/BatchMatMul/BatchMatMulV2/GemmD/GemmV3`、明确归一化轴的 `LayerNorm`、`PRelu`、`Add/Sub/Mul/Div/RealDiv`、常见 `Activation` 模式、`Eltwise`、`PoolingD`、`Softmax`；数据搬移/形状变换算子按 0 FLOPs 计。使用可验证的逻辑尺寸，未模拟内核开销。`FusionOpNode` 等缺少可确认语义的 GE 算子保留统计和时间，计算量标为未知。
 
 当前 MobileNetV3 OMC 的实际结果：
 
@@ -653,7 +725,7 @@ python -m unittest discover -s onnx_graph/tests -v
 python -m onnx_graph.verify_mobilenet
 ```
 
-135 个测试通过。新增 9 个 outputs 分层测试覆盖 slash=0 平面输出分组/多输出/时间均值及导出、原名保留、逐字节往返、子图数值验证、编辑后层级刷新、多输出共同父层级、缺失/冲突输出、原名时间匹配、空名及重名、完整主流程和诊断、旧 CSV/旧 ONNX 防混用及 CLI；新增 1 个 OMC 测试覆盖输出描述符分层及原名/依赖保留。新增 10 个别名测试覆盖 JSON 校验、最长前缀及边界、原始模型保留、输出与 input 证据、歧义及重名、缺少输出、profiling 别名匹配、完整流程及全部未匹配节点的打印和保存、CLI 参数；其中 10 个完整流程测试覆盖统计/时间/联合筛选/导出去重及总表衔接、修复名称共用、排除遗留层级 CSV、复用已有统计、统计失败停止、形状假设和可选 profiling、总表零值/部分覆盖、OMC 仅统计分支、自定义 domain 算子计数及指定 CSV 校验；8 个导出去重联动测试覆盖默认开启/关闭、代表清单与最终文件一致、重复运行、只处理本次筛选结果、空选择、解析失败保留、分组/删除失败、越界及文件变化检查、跨层级相似分组；14 个相似度测试覆盖连接顺序、串并联、端口、共享张量、独立分支排列、忽略名称和普通浮点权重、类型/形状/属性差异、控制常量及其上游值、外部权重、WL 特征相同但不同构、未知/动态形状、聚类链式误合并、分层报告与清单迁移、相似模式及失败记录；14 个批量导出测试覆盖严格阈值、AND/OR 联合条件、未知值、分层批量导出与数值结果、前缀边界、名称修复、重复/已有文件保留、文件名冲突、空筛选结果、空 CSV、控制台及清单中的过滤/失败原因、CSV 校验、统计与模型不一致、缺少边界类型时继续处理其他子图；32 个转换测试覆盖完整字段往返、空图名补齐、空图名模型运行 main.py、控制流子图空图名、重复与空名称、无名输入输出算子的跳过及边界保留、多输入/输出、多重边、前缀边界、名称修复歧义、控制流外部依赖、外部与稀疏权重、局部函数、量化元数据等；14 个统计测试覆盖层级分组、修复开关、分组/depthwise 卷积、矩阵乘法与广播、池化/归一化、不同 opset 的 Softmax、动态形状、未知算子、分层 CSV 的算子列/未知值/中文及特殊字符、空层级和报告输出；11 个运行时间测试覆盖多轮均值、多个运行算子映射、修复前后名称、歧义、不完整时间、零值及吞吐率、CSV 数据校验、可选开关和导出；13 个 OMC 测试覆盖嵌套图、区域隔离、多重/控制边、原始信息及 pickle 保留、CLI 转换、空名称和修复、32/64 位分区表、畸形文件、schema 不执行、分层 CSV 和 depthwise/融合计算量。OMC 集成测试需要 DDK GE schema，未提供时会明确跳过；ONNX 测试不依赖 DDK。
+152 个测试通过。新增 6 个编译后 OMC 总表测试、7 个通用编号/功耗 CSV 测试和 4 个 GE 计算量及真实 Const 描述符测试；另有 17 个旧功耗合并测试保持通过（需 openpyxl）。新增 9 个 outputs 分层测试覆盖 slash=0 平面输出分组/多输出/时间均值及导出、原名保留、逐字节往返、子图数值验证、编辑后层级刷新、多输出共同父层级、缺失/冲突输出、原名时间匹配、空名及重名、完整主流程和诊断、旧 CSV/旧 ONNX 防混用及 CLI；新增 1 个 OMC 测试覆盖输出描述符分层及原名/依赖保留。新增 10 个别名测试覆盖 JSON 校验、最长前缀及边界、原始模型保留、输出与 input 证据、歧义及重名、缺少输出、profiling 别名匹配、完整流程及全部未匹配节点的打印和保存、CLI 参数；其中 10 个完整流程测试覆盖统计/时间/联合筛选/导出去重及总表衔接、修复名称共用、排除遗留层级 CSV、复用已有统计、统计失败停止、形状假设和可选 profiling、总表零值/部分覆盖、OMC 仅统计分支、自定义 domain 算子计数及指定 CSV 校验；8 个导出去重联动测试覆盖默认开启/关闭、代表清单与最终文件一致、重复运行、只处理本次筛选结果、空选择、解析失败保留、分组/删除失败、越界及文件变化检查、跨层级相似分组；14 个相似度测试覆盖连接顺序、串并联、端口、共享张量、独立分支排列、忽略名称和普通浮点权重、类型/形状/属性差异、控制常量及其上游值、外部权重、WL 特征相同但不同构、未知/动态形状、聚类链式误合并、分层报告与清单迁移、相似模式及失败记录；14 个批量导出测试覆盖严格阈值、AND/OR 联合条件、未知值、分层批量导出与数值结果、前缀边界、名称修复、重复/已有文件保留、文件名冲突、空筛选结果、空 CSV、控制台及清单中的过滤/失败原因、CSV 校验、统计与模型不一致、缺少边界类型时继续处理其他子图；32 个转换测试覆盖完整字段往返、空图名补齐、空图名模型运行 main.py、控制流子图空图名、重复与空名称、无名输入输出算子的跳过及边界保留、多输入/输出、多重边、前缀边界、名称修复歧义、控制流外部依赖、外部与稀疏权重、局部函数、量化元数据等；14 个统计测试覆盖层级分组、修复开关、分组/depthwise 卷积、矩阵乘法与广播、池化/归一化、不同 opset 的 Softmax、动态形状、未知算子、分层 CSV 的算子列/未知值/中文及特殊字符、空层级和报告输出；11 个运行时间测试覆盖多轮均值、多个运行算子映射、修复前后名称、歧义、不完整时间、零值及吞吐率、CSV 数据校验、可选开关和导出；13 个 OMC 测试覆盖嵌套图、区域隔离、多重/控制边、原始信息及 pickle 保留、CLI 转换、空名称和修复、32/64 位分区表、畸形文件、schema 不执行、分层 CSV 和 depthwise/融合计算量。OMC 集成测试需要 DDK GE schema，未提供时会明确跳过；ONNX 测试不依赖 DDK。
 
 给定模型结果：241 个节点、279 条依赖边、144 个初始化张量。经过 pickle 保存/加载和 ONNX 恢复后，与原始文件**逐字节一致**。
 

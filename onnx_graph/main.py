@@ -26,7 +26,7 @@ else:
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = PACKAGE_DIR / "models/handfree_ainr/handfree_ainr.onnx"
+MODEL_PATH = PACKAGE_DIR / "models/mobilenetv3-large_224_1.0.onnx"
 PREFIX = "MobilenetV3/expanded_conv_1"
 HIERARCHY_SOURCE = "outputs"  # outputs 按输出路径分层并保留原始 name；name 使用旧规则。
 REPAIR_NAMES = True  # 仅 HIERARCHY_SOURCE="name" 时生效。
@@ -39,7 +39,7 @@ GENERATE_STATS = True  # False: 跳过统计，读取 STATS_DIR 中已有的全�
 STATS_DIR = MODEL_PATH.parent / "networkx" / (
     MODEL_PATH.stem + ("_omc_stats" if MODEL_PATH.suffix.lower() in (".omc", ".om") else "_stats"))
 SLASH_COUNTS = [0, 1, 2,  3]  # 本次统计及导出的层级；前导 / 不计数。
-PROFILE_CSV = MODEL_PATH.parent / "handfree_ainr_fuse_20261020_102316_op.csv"
+PROFILE_CSV = MODEL_PATH.parent / "_20261014_151905_op.csv"
 # PROFILE_CSV = None  # 不需要时间统计时设为 None。
 BATCH_SIZE = 1  # 仅用于统计估算：将输入的未知第 0 维视为 batch；None 禁用。
 INPUT_SHAPES = {}  # 仅用于统计估算，例如 {"input": [1, 3, 224, 224]}，不改写导出 ONNX。
