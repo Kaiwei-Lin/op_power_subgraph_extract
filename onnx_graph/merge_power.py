@@ -570,7 +570,8 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
         writer.writeheader()
         writer.writerows(rows)
     result = dict(batch_dir=str(root), power_dir=str(powers_root) if powers_root is not None else None,
-                  source_format="OMC", numbering_rule="slash 数字升序、文件名忽略大小写升序；从 1 开始",
+                  source_format="OMC", numbering_rule=("复用指定编号表" if numbering_csv is not None else
+                      "文件名忽略大小写全局升序，同名按相对路径升序；从 1 开始"),
                   omc_counts=compiled["counts"], power_counts=dict(Counter(r["功耗状态"] for r in rows)),
                   runtime_counts=dict(Counter(r["时长状态"] for r in rows)),
                   unused_power_files=unused_power, records=rows)

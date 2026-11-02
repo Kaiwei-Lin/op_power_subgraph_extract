@@ -40,13 +40,12 @@ def _slash(path, root):
 
 
 def number_models(omc_dir, numbering_csv=None):
-    """按 slash 数字及文件名（忽略大小写）编号；可用既有编号表固定对应关系。"""
+    """按文件名（忽略大小写）全局编号；可用既有编号表固定对应关系。"""
     root = Path(omc_dir).resolve()
     if not root.is_dir():
         raise NotADirectoryError(root)
     paths = [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in {".omc", ".om"}]
-    paths.sort(key=lambda p: (int(_slash(p, root)) if _slash(p, root) else float("inf"),
-                             p.name.casefold(), p.relative_to(root).as_posix()))
+    paths.sort(key=lambda p: (p.name.casefold(), p.relative_to(root).as_posix()))
     if not paths:
         raise FileNotFoundError(f"{root}: 没有 OMC/OM 文件")
     records = [dict(编号=i, 斜杠数=_slash(p, root), OMC相对路径=p.relative_to(root).as_posix(),

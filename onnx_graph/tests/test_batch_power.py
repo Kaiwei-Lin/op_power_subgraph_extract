@@ -55,14 +55,36 @@ class BatchPowerTests(unittest.TestCase):
         with path.open("w", encoding="utf-8-sig", newline="") as stream:
             csv.writer(stream).writerows(rows)
 
-    def test_numbering_uses_numeric_slash_and_case_insensitive_names(self):
+    def test_numbering_uses_global_case_insensitive_names_then_relative_paths(self):
         names = ["slash_2/sg_a.omc", "slash_10/sg_a.omc", "slash0/sg_Gemm.omc",
                  "slash0/sg_encoder.omc", "slash0/sg_decoder.omc", "slash_1/sg_a.omc"]
         for name in names:
             self.save_model(name)
         rows = number_models(self.models)
-        self.assertEqual([r["OMC相对路径"] for r in rows], [names[i] for i in (4, 3, 2, 5, 0, 1)])
+        self.assertEqual([r["OMC相对路径"] for r in rows], [names[i] for i in (5, 1, 0, 4, 3, 2)])
         self.assertEqual([r["编号"] for r in rows], list(range(1, 7)))
+
+    def test_global_filename_order_maps_power_across_directories(self):
+        self.save_model("a/b.omc")
+        self.save_model("b/a.omc")
+        self.power_csv(1, {"NPU": "11"})
+        self.power_csv(2, {"NPU": "22"})
+        result = self.run_merge()
+        self.assertEqual([(r["编号"], r["OMC相对路径"], r["NPU"]) for r in result["records"]],
+                         [(1, "b/a.omc", "11"), (2, "a/b.omc", "22")])
+        self.assertIn("全局", result["numbering_rule"])
+        with (self.output / "numbering.csv").open(encoding="utf-8-sig", newline="") as stream:
+            saved = list(csv.DictReader(stream))
+        saved[0]["编号"], saved[1]["编号"] = "2", "1"
+        with (self.output / "numbering.csv").open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(saved[0]))
+            writer.writeheader()
+            writer.writerows(saved)
+        reused = merge.merge_compiled_power(self.models, self.powers, self.root / "reused",
+                                            numbering_csv=self.output / "numbering.csv")
+        self.assertEqual([(r["OMC相对路径"], r["NPU"]) for r in reused["records"]],
+                         [("a/b.omc", "11"), ("b/a.omc", "22")])
+        self.assertEqual(reused["numbering_rule"], "复用指定编号表")
 
     def test_generic_batch_does_not_use_fixed_legacy_map_and_keeps_power_units(self):
         self.save_model("slash_0/sg_decoder.omc")
