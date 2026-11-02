@@ -113,7 +113,7 @@ class BatchPowerTests(unittest.TestCase):
         self.save_model("a/a.omc")
         for model in (1, 2):
             for index in range(1, 10):
-                path = self.power_csv(f"{model}_{index}", {"NPU": str(model * 100 + index)})
+                path = self.power_csv(f"{model}-{index}", {"NPU": str(model * 100 + index)})
                 self.set_csv_runtime(path, str(index / 2))
         from onnx_graph import compiled_stats
         with patch.object(compiled_stats, "analyze_compiled_subgraphs",
@@ -144,12 +144,12 @@ class BatchPowerTests(unittest.TestCase):
         self.save_model("model.omc")
         legacy = self.power_csv(1, {"NPU": "10"})
         self.set_csv_runtime(legacy, "2")
-        first = self.power_csv("1_1", {"NPU": "11"})
+        first = self.power_csv("1-1", {"NPU": "11"})
         self.set_csv_runtime(first, "1")
-        (self.powers / "1_1.xlsx").write_bytes(b"ambiguous")
-        (self.powers / "1_2.csv").write_text("invalid table", encoding="utf-8")
-        (self.powers / "1_10.csv").write_text("invalid frequency", encoding="utf-8")
-        self.power_csv("99_1")
+        (self.powers / "1-1.xlsx").write_bytes(b"ambiguous")
+        (self.powers / "1-2.csv").write_text("invalid table", encoding="utf-8")
+        (self.powers / "1-10.csv").write_text("invalid frequency", encoding="utf-8")
+        self.power_csv("99-1")
         result = self.run_merge()
         self.assertEqual(result["power_counts"], {"ok": 1, "ambiguous": 1, "failed": 1, "missing": 7})
         old, first, invalid, missing = result["records"][:4]
@@ -160,7 +160,7 @@ class BatchPowerTests(unittest.TestCase):
         self.assertEqual(missing["功耗状态"], "missing")
         self.assertNotIn("NPU", missing)
         self.assertIsNone(missing["数据移动吞吐"])
-        self.assertEqual({Path(p).name for p in result["unused_power_files"]}, {"1_10.csv", "99_1.csv"})
+        self.assertEqual({Path(p).name for p in result["unused_power_files"]}, {"1-10.csv", "99-1.csv"})
 
     def test_ddr_cli_can_generate_missing_frequency_rows_without_power(self):
         self.save_model("model.omc")

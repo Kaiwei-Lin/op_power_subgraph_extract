@@ -513,7 +513,7 @@ for level in report["levels"]:
 
 ### 多 DDR 频点功耗
 
-功耗文件支持 `模型编号_频点编号.csv`（也支持 `.xlsx`），频点编号 1～9 依次对应 **418、749、1066、1536、2102、2746、3187、3744、4253 MHz**。例如 `1_1.csv` 是模型 1 在 418 MHz 的数据，`1_9.csv` 是同一模型在 4253 MHz 的数据。文件直接放在功耗目录下。
+功耗文件支持 `模型编号-频点编号.csv`（也支持 `.xlsx`），频点编号 1～9 依次对应 **418、749、1066、1536、2102、2746、3187、3744、4253 MHz**。例如 `1-1.csv` 是模型 1 在 418 MHz 的数据，`1-9.csv` 是同一模型在 4253 MHz 的数据。文件直接放在功耗目录下。
 
 ```powershell
 python -m onnx_graph.merge_power --batch-dir D:/models/batch --power-dir D:/power --output-dir D:/results/ddr_sweep
@@ -523,7 +523,7 @@ python -m onnx_graph.merge_power --batch-dir D:/models/batch --power-dir D:/powe
 
 多频点总表新增 `OMC名字`、`DDR频点编号`、`DDR频率_MHz`，其余列沿用各 Channel 功耗、运行时长（H1，秒）、每种算子数量、数据移动字节数、数据移动吞吐（B/s）、MACs/FLOPs、完整性和状态列。每个频点的吞吐使用该频点自己的运行时长计算；静态算子数量、数据量和 FLOPs 在各频点重复列出。无法估算的 FLOPs 仍留空，保留已知部分。
 
-原来的 `1.csv` 等格式继续使用原流程，仅有此类文件时不增加 DDR 字段。若目录中同时包含 `1.csv` 和 `1_1.csv`，两种记录都会保留，`1.csv` 对应行的 DDR 字段留空。非法频点编号或未知模型编号的文件会列入 `summary.json` 的 `unused_power_files`。`numbering.csv` 始终每个模型一行，与频点数量无关。
+原来的 `1.csv` 等格式继续使用原流程，仅有此类文件时不增加 DDR 字段。若目录中同时包含 `1.csv` 和 `1-1.csv`，两种记录都会保留，`1.csv` 对应行的 DDR 字段留空。非法频点编号或未知模型编号的文件会列入 `summary.json` 的 `unused_power_files`。`numbering.csv` 始终每个模型一行，与频点数量无关。
 
 `merge_power.py --batch-dir` 模式直接读取编译后的 OMC，不需要原始 ONNX 或 `representatives_summary.csv`，也不使用旧代码中的 56 个固定编号。不同模型、不同子图数量都使用同一套扫描流程。
 

@@ -5,7 +5,7 @@
     python merge_power.py --batch-dir D:/models/batch --power-dir D:/power --output-dir D:/results/model_power
 先统计并保存编号（功耗尚未提供）：
     python merge_power.py --batch-dir D:/models/batch --output-dir D:/results/model_stats
-多 DDR 频点：自动识别 N_1.csv～N_9.csv，也可增加 --ddr-sweep 强制生成九个频点行。
+多 DDR 频点：自动识别 N-1.csv～N-9.csv，也可增加 --ddr-sweep 强制生成九个频点行。
 后续增加 --numbering D:/results/model_stats/numbering.csv 固定编号并验证 OMC SHA256。
 通用模式需要同目录的 compiled_stats.py、stats.py、omc.py 等解析模块。
 每个 OMC 按整个编译后运算图统计，输出算子数量、理论 FLOPs 和逐算子数据转移量。
@@ -512,7 +512,7 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
         raise FileExistsError(f"输出目录已存在，请指定新目录：{output}")
     sweep = ddr_sweep or (powers_root is not None and any(
         p.is_file() and p.suffix.lower() in {".csv", ".xlsx"}
-        and re.fullmatch(r"[1-9]\d*_[1-9]", p.stem) for p in powers_root.iterdir()))
+        and re.fullmatch(r"[1-9]\d*-[1-9]", p.stem) for p in powers_root.iterdir()))
     numbering = number_models(root, numbering_csv)
     compiled = analyze_compiled_subgraphs(root, output / "omc_stats", ge_proto_path=ge_proto_path)
     by_path = {Path(r["OMC文件"]).resolve(): r for r in compiled["records"]}
@@ -528,7 +528,7 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
                 (powers_root / f"{stem}{ext}").is_file() for ext in (".csv", ".xlsx"))):
             jobs.append((item, stem, None, None))
         if sweep:
-            jobs.extend((item, f"{stem}_{index}", index, mhz)
+            jobs.extend((item, f"{stem}-{index}", index, mhz)
                         for index, mhz in enumerate(DDR_FREQUENCIES_MHZ, 1))
     for item, power_stem, frequency_index, mhz in jobs:
         row = dict(by_path[(root / item["OMC相对路径"]).resolve()])
@@ -602,12 +602,12 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--batch-dir", type=Path, help="通用模式：包含 slash_0/slash0 等子目录的 OMC 文件夹")
     mode.add_argument("--summary", type=Path, help="旧模式：代表子图 representatives_summary.csv")
-    parser.add_argument("--power-dir", type=Path, help="通用模式读 N.csv 或 N_频点.csv（也支持 XLSX）；旧模式读 0.xlsx～56.xlsx")
+    parser.add_argument("--power-dir", type=Path, help="通用模式读 N.csv 或 N-频点.csv（也支持 XLSX）；旧模式读 0.xlsx～56.xlsx")
     parser.add_argument("--output-dir", type=Path, help="通用模式输出目录，必须尚不存在")
     parser.add_argument("--ge-proto", type=Path, help="通用模式：DDK 的 ge_ir_pb2.py")
     parser.add_argument("--numbering", type=Path, help="通用模式：复用已生成的 numbering.csv，校验文件 SHA256")
     parser.add_argument("--ddr-sweep", action="store_true",
-                        help="通用模式：为每个 OMC 生成 9 个 DDR 频点行；发现 N_1.csv～N_9.csv 时自动启用")
+                        help="通用模式：为每个 OMC 生成 9 个 DDR 频点行；发现 N-1.csv～N-9.csv 时自动启用")
     parser.add_argument("--stats-dir", type=Path, help="统计目录：stats_<数字>_slash.csv 和完整 stats.json")
     parser.add_argument("-o", "--output", type=Path, help="输出 CSV；默认后缀为 _with_power 或 _with_power_stats")
     args = parser.parse_args()
