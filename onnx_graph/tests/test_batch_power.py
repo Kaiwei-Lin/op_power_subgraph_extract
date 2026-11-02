@@ -105,6 +105,71 @@ class BatchPowerTests(unittest.TestCase):
             rows = list(csv.DictReader(stream))
         self.assertEqual([r["编号"] for r in rows], ["1", "2"])
         self.assertEqual((first.read_bytes(), second.read_bytes()), before)
+        self.assertNotIn("DDR频率_MHz", result["records"][0])
+        self.assertNotIn("DDR频率_MHz", rows[0])
+
+    def test_ddr_sweep_maps_all_frequencies_and_reuses_model_statistics(self):
+        self.save_model("b/b.omc")
+        self.save_model("a/a.omc")
+        for model in (1, 2):
+            for index in range(1, 10):
+                path = self.power_csv(f"{model}_{index}", {"NPU": str(model * 100 + index)})
+                self.set_csv_runtime(path, str(index / 2))
+        from onnx_graph import compiled_stats
+        with patch.object(compiled_stats, "analyze_compiled_subgraphs",
+                          wraps=compiled_stats.analyze_compiled_subgraphs) as analyze:
+            result = self.run_merge()
+        analyze.assert_called_once()
+        self.assertEqual(result["omc_counts"], {"ok": 2})
+        self.assertEqual(result["power_counts"], {"ok": 18})
+        self.assertEqual(result["runtime_counts"], {"ok": 18})
+        self.assertEqual(result["unused_power_files"], [])
+        for row, (model, index) in zip(result["records"],
+                                      [(m, i) for m in (1, 2) for i in range(1, 10)]):
+            self.assertEqual((row["编号"], row["DDR频点编号"], row["DDR频率_MHz"]),
+                             (model, index, (418, 749, 1066, 1536, 2102, 2746, 3187, 3744, 4253)[index - 1]))
+            self.assertEqual(row["OMC名字"], "a.omc" if model == 1 else "b.omc")
+            self.assertEqual(row["NPU"], str(model * 100 + index))
+            self.assertEqual((row["OMC_Add数量"], row["OMC_FLOPs"], row["OMC_数据转移字节数"]), (2, 8, 96))
+            self.assertEqual(row["运行时长"], index / 2)
+            self.assertAlmostEqual(row["数据移动吞吐"], 192 / index)
+        with (self.output / "summary.csv").open(encoding="utf-8-sig", newline="") as stream:
+            saved = list(csv.DictReader(stream))
+        self.assertEqual(len(saved), 18)
+        self.assertEqual(saved[-1]["DDR频率_MHz"], "4253")
+        with (self.output / "numbering.csv").open(encoding="utf-8-sig", newline="") as stream:
+            self.assertEqual(len(list(csv.DictReader(stream))), 2)
+
+    def test_ddr_mixed_legacy_missing_ambiguous_and_invalid_files(self):
+        self.save_model("model.omc")
+        legacy = self.power_csv(1, {"NPU": "10"})
+        self.set_csv_runtime(legacy, "2")
+        first = self.power_csv("1_1", {"NPU": "11"})
+        self.set_csv_runtime(first, "1")
+        (self.powers / "1_1.xlsx").write_bytes(b"ambiguous")
+        (self.powers / "1_2.csv").write_text("invalid table", encoding="utf-8")
+        (self.powers / "1_10.csv").write_text("invalid frequency", encoding="utf-8")
+        self.power_csv("99_1")
+        result = self.run_merge()
+        self.assertEqual(result["power_counts"], {"ok": 1, "ambiguous": 1, "failed": 1, "missing": 7})
+        old, first, invalid, missing = result["records"][:4]
+        self.assertIsNone(old["DDR频率_MHz"])
+        self.assertEqual((old["NPU"], old["运行时长"]), ("10", 2))
+        self.assertEqual(first["时长状态"], "ambiguous")
+        self.assertEqual(invalid["功耗状态"], "failed")
+        self.assertEqual(missing["功耗状态"], "missing")
+        self.assertNotIn("NPU", missing)
+        self.assertIsNone(missing["数据移动吞吐"])
+        self.assertEqual({Path(p).name for p in result["unused_power_files"]}, {"1_10.csv", "99_1.csv"})
+
+    def test_ddr_cli_can_generate_missing_frequency_rows_without_power(self):
+        self.save_model("model.omc")
+        args = ["merge_power", "--batch-dir", str(self.models), "--ddr-sweep", "--output-dir", str(self.output)]
+        with patch("sys.argv", args), redirect_stdout(StringIO()):
+            self.assertEqual(merge.main(), 0)
+        result = json.loads((self.output / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(result["records"]), 9)
+        self.assertEqual(result["power_counts"], {"missing": 9})
 
     def test_saved_numbering_validates_hashes_inventory_and_ids(self):
         model = self.save_model("slash_0/sg_a.omc")

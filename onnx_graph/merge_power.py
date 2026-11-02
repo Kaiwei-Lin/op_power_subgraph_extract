@@ -5,6 +5,7 @@
     python merge_power.py --batch-dir D:/models/batch --power-dir D:/power --output-dir D:/results/model_power
 先统计并保存编号（功耗尚未提供）：
     python merge_power.py --batch-dir D:/models/batch --output-dir D:/results/model_stats
+多 DDR 频点：自动识别 N_1.csv～N_9.csv，也可增加 --ddr-sweep 强制生成九个频点行。
 后续增加 --numbering D:/results/model_stats/numbering.csv 固定编号并验证 OMC SHA256。
 通用模式需要同目录的 compiled_stats.py、stats.py、omc.py 等解析模块。
 每个 OMC 按整个编译后运算图统计，输出算子数量、理论 FLOPs 和逐算子数据转移量。
@@ -42,6 +43,7 @@ except ImportError:
 
 
 SHEET_NAME = "Average Values Work0.db"
+DDR_FREQUENCIES_MHZ = (418, 749, 1066, 1536, 2102, 2746, 3187, 3744, 4253)
 FALLBACK_SHEET_NAME = "Average Values Work1.db"
 TRANSFER_FIELDS = ["输入及权重字节数", "输出字节数", "数据转移字节数", "数据转移量完整",
                    "未知数据转移节点数", "已知数据转移字节数"]
@@ -494,8 +496,9 @@ def read_power_csv(path):
     return powers
 
 
-def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None, numbering_csv=None):
-    """动态编号、OMC 整图统计、同号功耗合并；缺失功耗保留空值及原因。"""
+def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None, numbering_csv=None,
+                         ddr_sweep=False):
+    """动态编号、OMC 整图统计、同号/多频点功耗合并；缺失功耗保留空值及原因。"""
     if __package__:
         from .compiled_stats import analyze_compiled_subgraphs, number_models
     else:
@@ -507,6 +510,9 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
         raise NotADirectoryError(powers_root)
     if output.exists():
         raise FileExistsError(f"输出目录已存在，请指定新目录：{output}")
+    sweep = ddr_sweep or (powers_root is not None and any(
+        p.is_file() and p.suffix.lower() in {".csv", ".xlsx"}
+        and re.fullmatch(r"[1-9]\d*_[1-9]", p.stem) for p in powers_root.iterdir()))
     numbering = number_models(root, numbering_csv)
     compiled = analyze_compiled_subgraphs(root, output / "omc_stats", ge_proto_path=ge_proto_path)
     by_path = {Path(r["OMC文件"]).resolve(): r for r in compiled["records"]}
@@ -515,19 +521,31 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
         writer.writeheader()
         writer.writerows(numbering)
     rows, channels, unused_power = [], [], []
+    jobs = []
     for item in numbering:
+        stem = str(item["编号"])
+        if not sweep or (powers_root is not None and any(
+                (powers_root / f"{stem}{ext}").is_file() for ext in (".csv", ".xlsx"))):
+            jobs.append((item, stem, None, None))
+        if sweep:
+            jobs.extend((item, f"{stem}_{index}", index, mhz)
+                        for index, mhz in enumerate(DDR_FREQUENCIES_MHZ, 1))
+    for item, power_stem, frequency_index, mhz in jobs:
         row = dict(by_path[(root / item["OMC相对路径"]).resolve()])
         if row["OMC状态"] == "ok" and row["OMC_SHA256"] != item["OMC_SHA256"]:
             raise ValueError(f"统计期间 OMC 文件发生变化：{item['OMC相对路径']}")
         row.update(item)
+        if sweep:
+            row.update(OMC名字=Path(item["OMC相对路径"]).name, DDR频点编号=frequency_index,
+                       DDR频率_MHz=mhz)
         row.update(功耗文件="", 功耗状态="missing", 功耗原因="尚未提供功耗目录")
         row.update(运行时长=None, 运行时长单位="s", 时长状态="missing", 时长原因="尚未提供功耗目录",
                    数据移动吞吐=None, 数据移动吞吐单位="B/s")
         if powers_root is not None:
-            candidates = [p for suffix in (".csv", ".xlsx") if (p := powers_root / f"{item['编号']}{suffix}").is_file()]
+            candidates = [p for suffix in (".csv", ".xlsx") if (p := powers_root / f"{power_stem}{suffix}").is_file()]
             if not candidates:
-                row["功耗原因"] = f"缺少 {item['编号']}.csv（或 .xlsx），未知功耗不补零"
-                row["时长原因"] = f"缺少 {item['编号']}.csv（或 .xlsx），未读取 H1"
+                row["功耗原因"] = f"缺少 {power_stem}.csv（或 .xlsx），未知功耗不补零"
+                row["时长原因"] = f"缺少 {power_stem}.csv（或 .xlsx），未读取 H1"
             elif len(candidates) > 1:
                 row.update(功耗状态="ambiguous", 功耗原因="同一编号同时存在 CSV 和 XLSX，请保留一个对应文件")
                 row.update(时长状态="ambiguous", 时长原因="同一编号同时存在 CSV 和 XLSX，无法确定时长来源")
@@ -560,7 +578,7 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
         if row["功耗状态"] == "ok" and any(c not in row for c in channels):
             row.update(功耗状态="incomplete", 功耗原因="缺少 Channel：" + ", ".join(c for c in channels if c not in row))
     if powers_root is not None:
-        expected = {f"{r['编号']}{ext}" for r in numbering for ext in (".csv", ".xlsx")}
+        expected = {f"{stem}{ext}" for _, stem, _, _ in jobs for ext in (".csv", ".xlsx")}
         unused_power = [str(p) for p in sorted(powers_root.iterdir())
                         if p.is_file() and p.suffix.lower() in {".csv", ".xlsx"} and p.name.lower() not in expected]
     base_fields = list(dict.fromkeys(k for row in rows for k in row if k not in channels and k != "operator_counts"))
@@ -584,10 +602,12 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--batch-dir", type=Path, help="通用模式：包含 slash_0/slash0 等子目录的 OMC 文件夹")
     mode.add_argument("--summary", type=Path, help="旧模式：代表子图 representatives_summary.csv")
-    parser.add_argument("--power-dir", type=Path, help="通用模式读同号 N.csv/N.xlsx；旧模式读 0.xlsx～56.xlsx")
+    parser.add_argument("--power-dir", type=Path, help="通用模式读 N.csv 或 N_频点.csv（也支持 XLSX）；旧模式读 0.xlsx～56.xlsx")
     parser.add_argument("--output-dir", type=Path, help="通用模式输出目录，必须尚不存在")
     parser.add_argument("--ge-proto", type=Path, help="通用模式：DDK 的 ge_ir_pb2.py")
     parser.add_argument("--numbering", type=Path, help="通用模式：复用已生成的 numbering.csv，校验文件 SHA256")
+    parser.add_argument("--ddr-sweep", action="store_true",
+                        help="通用模式：为每个 OMC 生成 9 个 DDR 频点行；发现 N_1.csv～N_9.csv 时自动启用")
     parser.add_argument("--stats-dir", type=Path, help="统计目录：stats_<数字>_slash.csv 和完整 stats.json")
     parser.add_argument("-o", "--output", type=Path, help="输出 CSV；默认后缀为 _with_power 或 _with_power_stats")
     args = parser.parse_args()
@@ -597,7 +617,8 @@ def main():
         output = args.output_dir or args.batch_dir / "omc_power_summary"
         try:
             result = merge_compiled_power(args.batch_dir, args.power_dir, output,
-                                          ge_proto_path=args.ge_proto, numbering_csv=args.numbering)
+                                          ge_proto_path=args.ge_proto, numbering_csv=args.numbering,
+                                          ddr_sweep=args.ddr_sweep)
         except (OSError, ValueError) as error:
             print(f"合并失败：{error}", file=sys.stderr)
             return 1
@@ -605,6 +626,8 @@ def main():
         print(f"编号表：{Path(output).resolve() / 'numbering.csv'}")
         print(f"总表：{Path(output).resolve() / 'summary.csv'}")
         return 0
+    if args.ddr_sweep:
+        parser.error("--ddr-sweep 仅用于 --batch-dir 模式")
     if args.power_dir is None:
         parser.error("--summary 旧模式需要 --power-dir；通用 OMC 模式使用 --batch-dir")
     try:
