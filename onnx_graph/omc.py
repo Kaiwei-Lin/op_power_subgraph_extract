@@ -38,6 +38,8 @@ def _schema(path=None):
         path = os.environ.get("ONNX_GRAPH_GE_PROTO")
     if path is None and os.environ.get("DDK_PATH"):
         path = Path(os.environ["DDK_PATH"]) / _SCHEMA_RELATIVE
+    if path is None and Path(__file__).with_name("ge_ir_pb2.py").is_file():
+        path = Path(__file__).with_name("ge_ir_pb2.py")
     if path is None:
         local = Path(__file__).resolve().parents[2] / "spatialnet_field_kit/microbenchmark/.local"
         candidates = sorted(p / _SCHEMA_RELATIVE for p in local.glob("DDK-tools-*")

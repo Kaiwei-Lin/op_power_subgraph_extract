@@ -521,7 +521,7 @@ python -m onnx_graph.merge_power --batch-dir D:/models/networkx/model/batch --ou
 python -m onnx_graph.merge_power --batch-dir D:/models/networkx/model/batch --power-dir D:/power --numbering D:/results/model_omc_stats/numbering.csv --output-dir D:/results/model_with_power --ge-proto D:/DDK/tools/tools_ascendc/package/python/opc_tool/ge_ir_pb2.py
 ```
 
-也可直接运行 `python onnx_graph/merge_power.py` 并传同样的参数。`--ge-proto` 可用环境变量 `ONNX_GRAPH_GE_PROTO` 或 `DDK_PATH` 代替。输出目录必须尚不存在。
+也可直接运行 `python onnx_graph/merge_power.py` 并传同样的参数。默认使用仓库内置的 GE schema，可省略 `--ge-proto`；也可用环境变量 `ONNX_GRAPH_GE_PROTO` 或 `DDK_PATH` 代替。输出目录必须尚不存在。
 
 编号从 1 开始，先按 `slash_0/slash0`、`slash_1/slash1` 等目录的**数字**升序，再按完整文件名**忽略大小写的字典序**排列；不依赖文件系统遍历顺序。没有 slash 目录的文件排在已分层文件之后。每个 OMC 文件作为一个完整的已编译子图统计，不依赖编译图内部是否保留 `/`。
 
@@ -610,7 +610,7 @@ python -m onnx_graph.stats onnx_graph/models/mobilenetv3/omc/mobilenetv3-large_2
 python -m onnx_graph convert onnx_graph/models/mobilenetv3/omc/mobilenetv3-large_224_1.0.omc onnx_graph/models/mobilenetv3/omc/networkx/mobilenetv3.omc.nx.pkl
 ```
 
-OMC 解析需要 DDK 的 `tools/tools_ascendc/package/python/opc_tool/ge_ir_pb2.py`。当前仓库会自动找到已有文件；在其他电脑上设置 `GE_PROTO_PATH`、环境变量 `ONNX_GRAPH_GE_PROTO`，或传 `--ge-proto D:/DDK/tools/tools_ascendc/package/python/opc_tool/ge_ir_pb2.py`。也可以设置指向 DDK 根目录的 `DDK_PATH`。安装本目录的 `requirements.txt` 即可满足 Python 依赖；Windows 上不需要运行 Linux 编译器。解析器仅读取这个文件中的 protobuf descriptor 字节，不执行 SDK Python 代码，也不随本仓库复制 SDK schema。
+仓库已包含 DDK 6.1.1.0 的 `onnx_graph/ge_ir_pb2.py`，OMC 解析默认使用此文件，其他电脑无需安装 DDK 或指定 `--ge-proto`。如需使用其他版本，可通过 `GE_PROTO_PATH`、`--ge-proto`、环境变量 `ONNX_GRAPH_GE_PROTO` 或指向 DDK 根目录的 `DDK_PATH` 覆盖，显式配置优先于内置文件。安装本目录的 `requirements.txt` 即可满足 Python 依赖；Windows 上不需要运行 Linux 编译器。解析器仅读取文件中的 protobuf descriptor 字节，不导入或执行生成的 SDK Python 代码。
 
 OMC 使用编译时的输入形状，`BATCH_SIZE` 不改变它；`INPUT_SHAPES`/`--input-shape` 非空时会明确报错，避免用不对应的形状估算。默认报告目录为模型旁的 `networkx/<模型名>_omc_stats/`，与 ONNX 报告区分。
 
@@ -729,7 +729,7 @@ python -m unittest discover -s onnx_graph/tests -v
 python -m onnx_graph.verify_mobilenet
 ```
 
-156 个基础测试通过。新增 6 个编译后 OMC 总表测试、11 个通用编号/功耗 CSV/H1 时长和吞吐测试和 4 个 GE 计算量及真实 Const 描述符测试；另有 17 个旧功耗合并测试保持通过（需 openpyxl）。新增 9 个 outputs 分层测试覆盖 slash=0 平面输出分组/多输出/时间均值及导出、原名保留、逐字节往返、子图数值验证、编辑后层级刷新、多输出共同父层级、缺失/冲突输出、原名时间匹配、空名及重名、完整主流程和诊断、旧 CSV/旧 ONNX 防混用及 CLI；新增 1 个 OMC 测试覆盖输出描述符分层及原名/依赖保留。新增 10 个别名测试覆盖 JSON 校验、最长前缀及边界、原始模型保留、输出与 input 证据、歧义及重名、缺少输出、profiling 别名匹配、完整流程及全部未匹配节点的打印和保存、CLI 参数；其中 10 个完整流程测试覆盖统计/时间/联合筛选/导出去重及总表衔接、修复名称共用、排除遗留层级 CSV、复用已有统计、统计失败停止、形状假设和可选 profiling、总表零值/部分覆盖、OMC 仅统计分支、自定义 domain 算子计数及指定 CSV 校验；8 个导出去重联动测试覆盖默认开启/关闭、代表清单与最终文件一致、重复运行、只处理本次筛选结果、空选择、解析失败保留、分组/删除失败、越界及文件变化检查、跨层级相似分组；14 个相似度测试覆盖连接顺序、串并联、端口、共享张量、独立分支排列、忽略名称和普通浮点权重、类型/形状/属性差异、控制常量及其上游值、外部权重、WL 特征相同但不同构、未知/动态形状、聚类链式误合并、分层报告与清单迁移、相似模式及失败记录；14 个批量导出测试覆盖严格阈值、AND/OR 联合条件、未知值、分层批量导出与数值结果、前缀边界、名称修复、重复/已有文件保留、文件名冲突、空筛选结果、空 CSV、控制台及清单中的过滤/失败原因、CSV 校验、统计与模型不一致、缺少边界类型时继续处理其他子图；32 个转换测试覆盖完整字段往返、空图名补齐、空图名模型运行 main.py、控制流子图空图名、重复与空名称、无名输入输出算子的跳过及边界保留、多输入/输出、多重边、前缀边界、名称修复歧义、控制流外部依赖、外部与稀疏权重、局部函数、量化元数据等；14 个统计测试覆盖层级分组、修复开关、分组/depthwise 卷积、矩阵乘法与广播、池化/归一化、不同 opset 的 Softmax、动态形状、未知算子、分层 CSV 的算子列/未知值/中文及特殊字符、空层级和报告输出；11 个运行时间测试覆盖多轮均值、多个运行算子映射、修复前后名称、歧义、不完整时间、零值及吞吐率、CSV 数据校验、可选开关和导出；13 个 OMC 测试覆盖嵌套图、区域隔离、多重/控制边、原始信息及 pickle 保留、CLI 转换、空名称和修复、32/64 位分区表、畸形文件、schema 不执行、分层 CSV 和 depthwise/融合计算量。OMC 集成测试需要 DDK GE schema，未提供时会明确跳过；ONNX 测试不依赖 DDK。
+156 个基础测试通过。新增 6 个编译后 OMC 总表测试、11 个通用编号/功耗 CSV/H1 时长和吞吐测试和 4 个 GE 计算量及真实 Const 描述符测试；另有 17 个旧功耗合并测试保持通过（需 openpyxl）。新增 9 个 outputs 分层测试覆盖 slash=0 平面输出分组/多输出/时间均值及导出、原名保留、逐字节往返、子图数值验证、编辑后层级刷新、多输出共同父层级、缺失/冲突输出、原名时间匹配、空名及重名、完整主流程和诊断、旧 CSV/旧 ONNX 防混用及 CLI；新增 1 个 OMC 测试覆盖输出描述符分层及原名/依赖保留。新增 10 个别名测试覆盖 JSON 校验、最长前缀及边界、原始模型保留、输出与 input 证据、歧义及重名、缺少输出、profiling 别名匹配、完整流程及全部未匹配节点的打印和保存、CLI 参数；其中 10 个完整流程测试覆盖统计/时间/联合筛选/导出去重及总表衔接、修复名称共用、排除遗留层级 CSV、复用已有统计、统计失败停止、形状假设和可选 profiling、总表零值/部分覆盖、OMC 仅统计分支、自定义 domain 算子计数及指定 CSV 校验；8 个导出去重联动测试覆盖默认开启/关闭、代表清单与最终文件一致、重复运行、只处理本次筛选结果、空选择、解析失败保留、分组/删除失败、越界及文件变化检查、跨层级相似分组；14 个相似度测试覆盖连接顺序、串并联、端口、共享张量、独立分支排列、忽略名称和普通浮点权重、类型/形状/属性差异、控制常量及其上游值、外部权重、WL 特征相同但不同构、未知/动态形状、聚类链式误合并、分层报告与清单迁移、相似模式及失败记录；14 个批量导出测试覆盖严格阈值、AND/OR 联合条件、未知值、分层批量导出与数值结果、前缀边界、名称修复、重复/已有文件保留、文件名冲突、空筛选结果、空 CSV、控制台及清单中的过滤/失败原因、CSV 校验、统计与模型不一致、缺少边界类型时继续处理其他子图；32 个转换测试覆盖完整字段往返、空图名补齐、空图名模型运行 main.py、控制流子图空图名、重复与空名称、无名输入输出算子的跳过及边界保留、多输入/输出、多重边、前缀边界、名称修复歧义、控制流外部依赖、外部与稀疏权重、局部函数、量化元数据等；14 个统计测试覆盖层级分组、修复开关、分组/depthwise 卷积、矩阵乘法与广播、池化/归一化、不同 opset 的 Softmax、动态形状、未知算子、分层 CSV 的算子列/未知值/中文及特殊字符、空层级和报告输出；11 个运行时间测试覆盖多轮均值、多个运行算子映射、修复前后名称、歧义、不完整时间、零值及吞吐率、CSV 数据校验、可选开关和导出；13 个 OMC 测试覆盖嵌套图、区域隔离、多重/控制边、原始信息及 pickle 保留、CLI 转换、空名称和修复、32/64 位分区表、畸形文件、schema 不执行、分层 CSV 和 depthwise/融合计算量。OMC 集成测试默认使用仓库内置的 GE schema；ONNX 测试不依赖 DDK。
 
 给定模型结果：241 个节点、279 条依赖边、144 个初始化张量。经过 pickle 保存/加载和 ONNX 恢复后，与原始文件**逐字节一致**。
 

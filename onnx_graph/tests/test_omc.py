@@ -1,4 +1,5 @@
 import csv
+import os
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -9,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import networkx as nx
+import onnx_graph.omc as omc
 
 from onnx_graph import extract_prefix, networkx_to_onnx, nodes_by_prefix, omc_to_networkx
 from onnx_graph.omc import _cost, _schema
@@ -38,6 +40,14 @@ def tensor(desc, shape=(1, 4)):
 
 
 class OmcTests(unittest.TestCase):
+    def test_bundled_schema_without_ddk(self):
+        with patch.dict(os.environ, {}, clear=True):
+            Model, Graph, _, path = _schema()
+        self.assertEqual(Path(path).name, "ge_ir_pb2.py")
+        self.assertEqual(Path(path).parent, Path(omc.__file__).resolve().parent)
+        self.assertEqual(Model.DESCRIPTOR.full_name, "ge.proto.ModelDef")
+        self.assertEqual(Graph.DESCRIPTOR.full_name, "ge.proto.GraphDef")
+
     @classmethod
     def setUpClass(cls):
         try:
