@@ -513,6 +513,16 @@ for level in report["levels"]:
 
 ### 多 DDR 频点功耗
 
+每个模型的 DDR 频率与组件功耗折线图可用独立脚本生成（需 `pip install matplotlib`；读取 XLSX 另需 `openpyxl`）：
+
+```powershell
+python -m onnx_graph.plot_ddr_power --summary D:/results/ddr_summary/summary.csv --output-dir D:/results/ddr_plots
+# 增删 --channels 后面的组件即可调整图例；也可修改脚本顶部 CHANNELS。
+python -m onnx_graph.plot_ddr_power --summary D:/results/ddr_summary/summary.csv --output-dir D:/results/ddr_plots_custom --channels VBUCK0_PERI DDRPHY VDD_NPU
+```
+
+每个模型输出一张 PNG 和一张可编辑 SVG，横轴固定显示 9 个 DDR 频率，按真实 MHz 间距排列，纵轴为 W。默认组件为 `VBUCK0_PERI VBUCK8_1V8 VBUCK1_1V12 DDRPHY`。支持括号说明列名和 XLSX 输入（`--sheet` 指定工作表，默认第一张）。无单位数字默认按 W；若原始数字为 mW，传 `--power-unit mW`；带 W/mW/uW 后缀的值自动转换。缺失点断线，不补零；无频率记录跳过，同一模型/频点重复时报错。输出目录必须为新目录。绘图不修改源表或原统计流程。
+
 功耗文件支持 `模型编号-频点编号.csv`（也支持 `.xlsx`），频点编号 1～9 依次对应 **418、749、1066、1536、2102、2746、3187、3744、4253 MHz**。例如 `1-1.csv` 是模型 1 在 418 MHz 的数据，`1-9.csv` 是同一模型在 4253 MHz 的数据。文件直接放在功耗目录下。
 
 ```powershell
