@@ -107,6 +107,9 @@ def plot_summary(source, output_dir=None, channels=None, *, sheet=None, bare_uni
     channels = CHANNELS if channels is None else channels
     headers, rows = read_table(source, sheet)
     groups = prepare_series(headers, rows, channels, bare_unit)
+    # 输入解析统一为 W；仅在绘图边界转换成 mW，源数据保持不变。
+    groups = {model: {freq: [value * 1000 for value in values] for freq, values in points.items()}
+              for model, points in groups.items()}
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -135,7 +138,7 @@ def plot_summary(source, output_dir=None, channels=None, *, sheet=None, bare_uni
         import textwrap
         ax.set_title("\n".join(textwrap.wrap(title, 70)), fontsize=12, pad=14)
         ax.set_xlabel("DDR frequency (MHz)")
-        ax.set_ylabel("Power (W)")
+        ax.set_ylabel("Power (mW)")
         ax.set_xticks(FREQUENCIES)
         ax.tick_params(axis="x", labelrotation=35)
         ax.grid(alpha=0.22)
@@ -173,7 +176,7 @@ def plot_summary(source, output_dir=None, channels=None, *, sheet=None, bare_uni
     differences = power_ranges(groups, len(channels))
     fig, ax = plt.subplots(figsize=(11, 6), layout="constrained")
     draw(ax, "Power range across models (max - min)", differences)
-    ax.set_ylabel("Power difference (W)")
+    ax.set_ylabel("Power difference (mW)")
     finite = [v for point in differences.values() for v in point if math.isfinite(v)]
     # 极差采用独立纵轴，避免绝对功耗的统一范围掩盖差异。
     ax.set_yticks([])
@@ -191,9 +194,9 @@ def main():
     parser.add_argument("--channels", nargs="+", default=CHANNELS, help="要绘制的组件列名，可增删")
     parser.add_argument("--sheet", help="XLSX 工作表名称，默认第一张")
     parser.add_argument("--power-unit", choices=("W", "mW", "uW"), default="W", help="无单位功耗的单位，默认 W")
-    parser.add_argument("--y-min", type=float, help="统一 Y 轴下限，单位 W")
-    parser.add_argument("--y-max", type=float, help="统一 Y 轴上限，单位 W")
-    parser.add_argument("--y-step", type=float, help="统一 Y 轴刻度间隔，单位 W")
+    parser.add_argument("--y-min", type=float, help="统一 Y 轴下限，单位 mW")
+    parser.add_argument("--y-max", type=float, help="统一 Y 轴上限，单位 mW")
+    parser.add_argument("--y-step", type=float, help="统一 Y 轴刻度间隔，单位 mW")
     args = parser.parse_args()
     files = plot_summary(args.summary, args.output_dir, args.channels, sheet=args.sheet, bare_unit=args.power_unit,
                          y_min=args.y_min, y_max=args.y_max, y_step=args.y_step)

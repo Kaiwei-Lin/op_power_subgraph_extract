@@ -28,17 +28,25 @@ class PlotPowerTests(unittest.TestCase):
         headers = ["OMC名字", "DDR频率_MHz", "DDRPHY"]
         rows = [dict(zip(headers, ("a", 418, .1))), dict(zip(headers, ("b", 418, .8)))]
         axes = []
+        plotted = []
         def capture(fig, *args, **kwargs):
             axes.extend((ax.get_ylim(), list(ax.get_yticks())) for ax in fig.axes
-                        if ax.get_visible() and ax.get_ylabel() == "Power (W)")
+                        if ax.get_visible() and ax.get_ylabel() == "Power (mW)")
+            plotted.extend((ax.get_ylabel(), float(ax.lines[0].get_ydata()[0])) for ax in fig.axes
+                           if ax.get_visible() and ax.lines)
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory, \
                 patch.object(plot, "read_table", return_value=(headers, rows)), \
                 patch.object(Figure, "savefig", capture):
-            files = plot.plot_summary("unused.csv", directory, ["DDRPHY"], y_min=0, y_max=1, y_step=.2)
+            files = plot.plot_summary("unused.csv", directory, ["DDRPHY"], y_min=0, y_max=1000, y_step=200)
         self.assertEqual(len(files), 8)
-        self.assertTrue(all(limits == (0, 1) for limits, _ in axes))
+        self.assertTrue(axes)
+        self.assertTrue(all(limits == (0, 1000) for limits, _ in axes))
         self.assertTrue(all(ticks == axes[0][1] for _, ticks in axes))
         self.assertTrue(any(p.name == "all_models_ddr_power.png" for p in files))
+        self.assertIn(("Power (mW)", 100), plotted)
+        self.assertIn(("Power (mW)", 800), plotted)
+        self.assertTrue(any(label == "Power difference (mW)" and abs(value - 700) < 1e-9
+                            for label, value in plotted))
 
     def test_cli_output_directory_is_optional(self):
         with patch("sys.argv", ["plot", "--summary", "example/summary.csv"]), \

@@ -513,9 +513,9 @@ for level in report["levels"]:
 
 ### 多 DDR 频点功耗
 
-绘图还会输出 `all_models_power_range.png/.svg`：横轴 DDR 频率，每条组件曲线为该频点所有有效模型功耗的最大值减最小值（W），表示绝对极差，不是百分比变化率。组件仍由 `--channels` 决定。缺失功耗不补零；某频点/组件不足两个有效模型时断线。极差图使用独立的从零开始的 Y 轴，不受绝对功耗图的 `--y-min/--y-max/--y-step` 影响。
+绘图还会输出 `all_models_power_range.png/.svg`：横轴 DDR 频率，每条组件曲线为该频点所有有效模型功耗的最大值减最小值（mW），表示绝对极差，不是百分比变化率。组件仍由 `--channels` 决定。缺失功耗不补零；某频点/组件不足两个有效模型时断线。极差图使用独立的从零开始的 Y 轴，不受绝对功耗图的 `--y-min/--y-max/--y-step` 影响。
 
-绘图默认对本次全部模型统一 Y 轴范围和刻度，并额外生成 `all_models_ddr_power.png/.svg` 总览图（每个模型一个子图，共享坐标轴）。可用 `--y-min 0 --y-max 1 --y-step 0.1` 固定上下限与刻度间隔，单位均为 W；跨不同批次比较时使用相同参数。未指定范围时根据全部所选组件数据统一确定。
+绘图默认对本次全部模型统一 Y 轴范围和刻度，并额外生成 `all_models_ddr_power.png/.svg` 总览图（每个模型一个子图，共享坐标轴）。可用 `--y-min 0 --y-max 1000 --y-step 100` 固定上下限与刻度间隔，单位均为 mW；跨不同批次比较时使用相同参数。未指定范围时根据全部所选组件数据统一确定。
 
 每个模型的 DDR 频率与组件功耗折线图可用独立脚本生成（需 `pip install matplotlib`；读取 XLSX 另需 `openpyxl`）：
 
@@ -525,7 +525,7 @@ python -m onnx_graph.plot_ddr_power --summary D:/results/ddr_summary/summary.csv
 python -m onnx_graph.plot_ddr_power --summary D:/results/ddr_summary/summary.csv --output-dir D:/results/ddr_plots_custom --channels VBUCK0_PERI DDRPHY VDD_NPU
 ```
 
-每个模型输出一张 PNG 和一张可编辑 SVG，横轴固定显示 9 个 DDR 频率，按真实 MHz 间距排列，纵轴为 W。默认组件为 `VBUCK0_PERI VBUCK8_1V8 VBUCK1_1V12 DDRPHY`。支持括号说明列名和 XLSX 输入（`--sheet` 指定工作表，默认第一张）。无单位数字默认按 W；若原始数字为 mW，传 `--power-unit mW`；带 W/mW/uW 后缀的值自动转换。缺失点断线，不补零；无频率记录跳过，同一模型/频点重复时报错。绘图默认直接保存到 summary 所在文件夹，`--output-dir` 可省略；目录可存在，仅覆盖同名图片，不删除其他文件。绘图不修改源表或原统计流程。
+每个模型输出一张 PNG 和一张可编辑 SVG，横轴固定显示 9 个 DDR 频率，按真实 MHz 间距排列，纵轴为 mW（W 数值自动乘以 1000）。默认组件为 `VBUCK0_PERI VBUCK8_1V8 VBUCK1_1V12 DDRPHY`。支持括号说明列名和 XLSX 输入（`--sheet` 指定工作表，默认第一张）。无单位数字默认按 W；若原始数字为 mW，传 `--power-unit mW`；带 W/mW/uW 后缀的值自动转换。缺失点断线，不补零；无频率记录跳过，同一模型/频点重复时报错。绘图默认直接保存到 summary 所在文件夹，`--output-dir` 可省略；目录可存在，仅覆盖同名图片，不删除其他文件。绘图不修改源表或原统计流程。
 
 功耗文件支持 `模型编号-频点编号.csv`（也支持 `.xlsx`），频点编号 1～9 依次对应 **418、749、1066、1536、2102、2746、3187、3744、4253 MHz**。例如 `1-1.csv` 是模型 1 在 418 MHz 的数据，`1-9.csv` 是同一模型在 4253 MHz 的数据。文件直接放在功耗目录下。
 
