@@ -513,6 +513,14 @@ for level in report["levels"]:
 
 ### 多 DDR 频点功耗
 
+论文用固定频率吞吐率/功耗四宫格和逐频率相关性统计：
+
+```powershell
+python -m onnx_graph.plot_power_throughput --summary D:/results/summary.xlsx --output-dir D:/results/fixed_frequency
+```
+
+该独立脚本需要 Matplotlib、SciPy（Excel 另需 openpyxl）。读取 CSV/XLSX 原始数值，四个电源轨依次为 VBUCK0_PERI、VBUCK1_1V12、DDRPHY、VBUCK8_1V8。本图遵循论文要求使用 W，横轴以 GB/s 显示（十进制）；单位取吞吐率列名或 `数据移动吞吐单位`，无法识别时必须指定 `--throughput-unit`。每条线是固定 DDR 频率，点为模型并按吞吐率升序连接；模型用不同 marker，颜色表示频率。输出 300 DPI PNG、矢量 PDF、`fixed_frequency_statistics.csv`、`correlation_analysis.csv` 和缺失检查 `validation.json`。各频率独立计算相关性，记录有效样本数；常量输入、样本不足或零均值相对差异留空。不删除离群值、不平滑；三个模型的相关性仅供探索，不能证明因果或统计显著性。
+
 绘图还会输出 `all_models_power_range.png/.svg`：横轴 DDR 频率，每条组件曲线为该频点所有有效模型功耗的最大值减最小值（mW），表示绝对极差，不是百分比变化率。组件仍由 `--channels` 决定。缺失功耗不补零；某频点/组件不足两个有效模型时断线。极差图使用独立的从零开始的 Y 轴，不受绝对功耗图的 `--y-min/--y-max/--y-step` 影响。
 
 绘图默认对本次全部模型统一 Y 轴范围和刻度，并额外生成 `all_models_ddr_power.png/.svg` 总览图（每个模型一个子图，共享坐标轴）。可用 `--y-min 0 --y-max 1000 --y-step 100` 固定上下限与刻度间隔，单位均为 mW；跨不同批次比较时使用相同参数。未指定范围时根据全部所选组件数据统一确定。
