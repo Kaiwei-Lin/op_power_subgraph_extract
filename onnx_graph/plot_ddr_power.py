@@ -89,20 +89,32 @@ def prepare_series(headers, rows, channels, bare_unit="W"):
     return groups
 
 
-def plot_summary(source, output_dir=None, channels=None, *, sheet=None, bare_unit="W"):
+def plot_summary(source, output_dir=None, channels=None, *, sheet=None, bare_unit="W",
+                 y_min=None, y_max=None, y_step=None):
     channels = CHANNELS if channels is None else channels
     headers, rows = read_table(source, sheet)
     groups = prepare_series(headers, rows, channels, bare_unit)
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator
+    values = [v for points in groups.values() for point in points.values() for v in point if math.isfinite(v)]
+    lower = min(0, min(values, default=0)) if y_min is None else y_min
+    upper = max(max(values, default=0) * 1.05, lower + 0.1) if y_max is None else y_max
+    if not all(math.isfinite(v) for v in (lower, upper)) or lower >= upper:
+        raise ValueError("Y 轴上下限必须有限且下限小于上限")
+    if y_step is not None:
+        if not math.isfinite(y_step) or y_step <= 0 or (upper - lower) / y_step > 1000:
+            raise ValueError("Y 轴刻度间隔必须为有限正数，且刻度数不能超过 1000")
+        ticks = [lower + i * y_step for i in range(math.floor((upper - lower) / y_step + 1e-9) + 1)]
+    else:
+        ticks = [t for t in MaxNLocator(nbins=6).tick_values(lower, upper) if lower <= t <= upper]
     plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
     plt.rcParams["svg.fonttype"] = "none"
     output = Path(output_dir) if output_dir is not None else Path(source).resolve().parent
     output.mkdir(parents=True, exist_ok=True)
     files = []
-    for model, points in sorted(groups.items()):
-        fig, ax = plt.subplots(figsize=(11, 6), layout="constrained")
+    def draw(ax, model, points):
         for i, channel in enumerate(channels):
             values = [points.get(f, [math.nan] * len(channels))[i] for f in FREQUENCIES]
             ax.plot(FREQUENCIES, values, marker="o", linewidth=2, markersize=5, label=channel)
@@ -115,13 +127,36 @@ def plot_summary(source, output_dir=None, channels=None, *, sheet=None, bare_uni
         ax.tick_params(axis="x", labelrotation=35)
         ax.grid(alpha=0.22)
         ax.spines[["top", "right"]].set_visible(False)
-        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.23), ncol=min(4, len(channels)), frameon=False)
-        stem = re.sub(r"[^\w.-]", "_", title)[:100] + "_" + sha256(model.encode()).hexdigest()[:10]
+        ax.set_ylim(lower, upper)
+        ax.set_yticks(ticks)
+
+    def save(fig, stem):
         for ext in ("png", "svg"):
             path = output / f"{stem}.{ext}"
             fig.savefig(path, dpi=180, bbox_inches="tight")
             files.append(path)
         plt.close(fig)
+
+    for model, points in sorted(groups.items()):
+        fig, ax = plt.subplots(figsize=(11, 6), layout="constrained")
+        draw(ax, model, points)
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.23), ncol=min(4, len(channels)), frameon=False)
+        title = Path(model.replace("\\", "/")).name
+        stem = re.sub(r"[^\w.-]", "_", title)[:100] + "_" + sha256(model.encode()).hexdigest()[:10]
+        save(fig, stem)
+    columns = min(3, len(groups))
+    rows_count = math.ceil(len(groups) / columns)
+    fig, axes = plt.subplots(rows_count, columns, figsize=(7 * columns, 4.8 * rows_count),
+                             squeeze=False, sharex=True, sharey=True, layout="constrained")
+    for ax, (model, points) in zip(axes.flat, sorted(groups.items())):
+        draw(ax, model, points)
+        ax.tick_params(labelleft=True, labelbottom=True)
+    for ax in list(axes.flat)[len(groups):]:
+        ax.set_visible(False)
+    handles, labels = axes.flat[0].get_legend_handles_labels()
+    fig.suptitle("DDR power comparison — shared Y axis", fontsize=16)
+    fig.legend(handles, labels, loc="outside lower center", ncol=min(4, len(channels)), frameon=False)
+    save(fig, "all_models_ddr_power")
     return files
 
 
@@ -132,9 +167,13 @@ def main():
     parser.add_argument("--channels", nargs="+", default=CHANNELS, help="要绘制的组件列名，可增删")
     parser.add_argument("--sheet", help="XLSX 工作表名称，默认第一张")
     parser.add_argument("--power-unit", choices=("W", "mW", "uW"), default="W", help="无单位功耗的单位，默认 W")
+    parser.add_argument("--y-min", type=float, help="统一 Y 轴下限，单位 W")
+    parser.add_argument("--y-max", type=float, help="统一 Y 轴上限，单位 W")
+    parser.add_argument("--y-step", type=float, help="统一 Y 轴刻度间隔，单位 W")
     args = parser.parse_args()
-    files = plot_summary(args.summary, args.output_dir, args.channels, sheet=args.sheet, bare_unit=args.power_unit)
-    print(f"已生成 {len(files) // 2} 个模型的 PNG/SVG 图：{files[0].parent.resolve()}")
+    files = plot_summary(args.summary, args.output_dir, args.channels, sheet=args.sheet, bare_unit=args.power_unit,
+                         y_min=args.y_min, y_max=args.y_max, y_step=args.y_step)
+    print(f"已生成模型独立图和总览图（PNG/SVG）：{files[0].parent.resolve()}")
 
 
 if __name__ == "__main__":

@@ -513,6 +513,8 @@ for level in report["levels"]:
 
 ### 多 DDR 频点功耗
 
+绘图默认对本次全部模型统一 Y 轴范围和刻度，并额外生成 `all_models_ddr_power.png/.svg` 总览图（每个模型一个子图，共享坐标轴）。可用 `--y-min 0 --y-max 1 --y-step 0.1` 固定上下限与刻度间隔，单位均为 W；跨不同批次比较时使用相同参数。未指定范围时根据全部所选组件数据统一确定。
+
 每个模型的 DDR 频率与组件功耗折线图可用独立脚本生成（需 `pip install matplotlib`；读取 XLSX 另需 `openpyxl`）：
 
 ```powershell

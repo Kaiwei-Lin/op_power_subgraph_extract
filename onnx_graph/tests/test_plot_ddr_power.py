@@ -2,12 +2,32 @@ import math
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+import tempfile
 from onnx_graph import plot_ddr_power as plot
 
 from onnx_graph.plot_ddr_power import prepare_series, power_watts
 
 
 class PlotPowerTests(unittest.TestCase):
+    def test_individual_and_overview_share_y_ticks(self):
+        try:
+            from matplotlib.figure import Figure
+        except ImportError:
+            self.skipTest("绘图集成测试需要 matplotlib")
+        headers = ["OMC名字", "DDR频率_MHz", "DDRPHY"]
+        rows = [dict(zip(headers, ("a", 418, .1))), dict(zip(headers, ("b", 418, .8)))]
+        axes = []
+        def capture(fig, *args, **kwargs):
+            axes.extend((ax.get_ylim(), list(ax.get_yticks())) for ax in fig.axes if ax.get_visible())
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory, \
+                patch.object(plot, "read_table", return_value=(headers, rows)), \
+                patch.object(Figure, "savefig", capture):
+            files = plot.plot_summary("unused.csv", directory, ["DDRPHY"], y_min=0, y_max=1, y_step=.2)
+        self.assertEqual(len(files), 6)
+        self.assertTrue(all(limits == (0, 1) for limits, _ in axes))
+        self.assertTrue(all(ticks == axes[0][1] for _, ticks in axes))
+        self.assertTrue(any(p.name == "all_models_ddr_power.png" for p in files))
+
     def test_cli_output_directory_is_optional(self):
         with patch("sys.argv", ["plot", "--summary", "example/summary.csv"]), \
                 patch.object(plot, "plot_summary", return_value=[Path("example/chart.png"), Path("example/chart.svg")]) as draw, \
