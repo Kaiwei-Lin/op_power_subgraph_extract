@@ -9,6 +9,17 @@ from onnx_graph.plot_ddr_power import prepare_series, power_watts
 
 
 class PlotPowerTests(unittest.TestCase):
+    def test_power_range_uses_same_frequency_and_channel(self):
+        groups = {"a": {418: [.1, .5], 749: [.3, math.nan]},
+                  "b": {418: [.4, .5], 749: [.7, .2]},
+                  "c": {418: [.2, .5]}}
+        ranges = plot.power_ranges(groups, 2)
+        self.assertAlmostEqual(ranges[418][0], .3)
+        self.assertEqual(ranges[418][1], 0)
+        self.assertAlmostEqual(ranges[749][0], .4)
+        self.assertTrue(math.isnan(ranges[749][1]))
+        self.assertTrue(math.isnan(ranges[1066][0]))
+
     def test_individual_and_overview_share_y_ticks(self):
         try:
             from matplotlib.figure import Figure
@@ -18,12 +29,13 @@ class PlotPowerTests(unittest.TestCase):
         rows = [dict(zip(headers, ("a", 418, .1))), dict(zip(headers, ("b", 418, .8)))]
         axes = []
         def capture(fig, *args, **kwargs):
-            axes.extend((ax.get_ylim(), list(ax.get_yticks())) for ax in fig.axes if ax.get_visible())
+            axes.extend((ax.get_ylim(), list(ax.get_yticks())) for ax in fig.axes
+                        if ax.get_visible() and ax.get_ylabel() == "Power (W)")
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory, \
                 patch.object(plot, "read_table", return_value=(headers, rows)), \
                 patch.object(Figure, "savefig", capture):
             files = plot.plot_summary("unused.csv", directory, ["DDRPHY"], y_min=0, y_max=1, y_step=.2)
-        self.assertEqual(len(files), 6)
+        self.assertEqual(len(files), 8)
         self.assertTrue(all(limits == (0, 1) for limits, _ in axes))
         self.assertTrue(all(ticks == axes[0][1] for _, ticks in axes))
         self.assertTrue(any(p.name == "all_models_ddr_power.png" for p in files))

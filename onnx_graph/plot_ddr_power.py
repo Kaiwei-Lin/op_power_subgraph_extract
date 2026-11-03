@@ -89,6 +89,19 @@ def prepare_series(headers, rows, channels, bare_unit="W"):
     return groups
 
 
+def power_ranges(groups, channel_count):
+    """每个频点按组件计算模型间极差；不足两个有效模型时保持未知。"""
+    result = {}
+    for frequency in FREQUENCIES:
+        differences = []
+        for i in range(channel_count):
+            values = [points[frequency][i] for points in groups.values()
+                      if frequency in points and math.isfinite(points[frequency][i])]
+            differences.append(max(values) - min(values) if len(values) >= 2 else math.nan)
+        result[frequency] = differences
+    return result
+
+
 def plot_summary(source, output_dir=None, channels=None, *, sheet=None, bare_unit="W",
                  y_min=None, y_max=None, y_step=None):
     channels = CHANNELS if channels is None else channels
@@ -157,6 +170,17 @@ def plot_summary(source, output_dir=None, channels=None, *, sheet=None, bare_uni
     fig.suptitle("DDR power comparison — shared Y axis", fontsize=16)
     fig.legend(handles, labels, loc="outside lower center", ncol=min(4, len(channels)), frameon=False)
     save(fig, "all_models_ddr_power")
+    differences = power_ranges(groups, len(channels))
+    fig, ax = plt.subplots(figsize=(11, 6), layout="constrained")
+    draw(ax, "Power range across models (max - min)", differences)
+    ax.set_ylabel("Power difference (W)")
+    finite = [v for point in differences.values() for v in point if math.isfinite(v)]
+    # 极差采用独立纵轴，避免绝对功耗的统一范围掩盖差异。
+    ax.set_yticks([])
+    ax.set_ylim(0, max(max(finite, default=0) * 1.05, 0.01))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.23), ncol=min(4, len(channels)), frameon=False)
+    save(fig, "all_models_power_range")
     return files
 
 
@@ -173,7 +197,7 @@ def main():
     args = parser.parse_args()
     files = plot_summary(args.summary, args.output_dir, args.channels, sheet=args.sheet, bare_unit=args.power_unit,
                          y_min=args.y_min, y_max=args.y_max, y_step=args.y_step)
-    print(f"已生成模型独立图和总览图（PNG/SVG）：{files[0].parent.resolve()}")
+    print(f"已生成模型独立图、总览图和功耗极差图（PNG/SVG）：{files[0].parent.resolve()}")
 
 
 if __name__ == "__main__":
