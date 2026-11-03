@@ -89,7 +89,7 @@ def prepare_series(headers, rows, channels, bare_unit="W"):
     return groups
 
 
-def plot_summary(source, output_dir, channels=None, *, sheet=None, bare_unit="W"):
+def plot_summary(source, output_dir=None, channels=None, *, sheet=None, bare_unit="W"):
     channels = CHANNELS if channels is None else channels
     headers, rows = read_table(source, sheet)
     groups = prepare_series(headers, rows, channels, bare_unit)
@@ -98,8 +98,8 @@ def plot_summary(source, output_dir, channels=None, *, sheet=None, bare_unit="W"
     import matplotlib.pyplot as plt
     plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
     plt.rcParams["svg.fonttype"] = "none"
-    output = Path(output_dir)
-    output.mkdir(parents=True, exist_ok=False)
+    output = Path(output_dir) if output_dir is not None else Path(source).resolve().parent
+    output.mkdir(parents=True, exist_ok=True)
     files = []
     for model, points in sorted(groups.items()):
         fig, ax = plt.subplots(figsize=(11, 6), layout="constrained")
@@ -128,13 +128,13 @@ def plot_summary(source, output_dir, channels=None, *, sheet=None, bare_unit="W"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--summary", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True, help="必须为新目录")
+    parser.add_argument("--output-dir", type=Path, help="默认 summary 所在目录；覆盖同名图，不删除其他文件")
     parser.add_argument("--channels", nargs="+", default=CHANNELS, help="要绘制的组件列名，可增删")
     parser.add_argument("--sheet", help="XLSX 工作表名称，默认第一张")
     parser.add_argument("--power-unit", choices=("W", "mW", "uW"), default="W", help="无单位功耗的单位，默认 W")
     args = parser.parse_args()
     files = plot_summary(args.summary, args.output_dir, args.channels, sheet=args.sheet, bare_unit=args.power_unit)
-    print(f"已生成 {len(files) // 2} 个模型的 PNG/SVG 图：{args.output_dir.resolve()}")
+    print(f"已生成 {len(files) // 2} 个模型的 PNG/SVG 图：{files[0].parent.resolve()}")
 
 
 if __name__ == "__main__":

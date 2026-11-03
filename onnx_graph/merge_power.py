@@ -19,7 +19,7 @@ CSV 功耗读取 Channel/Power，取表头后前 12 条非空数据行，保留�
 旧模式兼容既有的固定功耗编号、0.xlsx 整模型及 --stats-dir 统计合并。
 Excel 优先 Average Values Work0.db，其次 Average Values Work1.db。
 读取第 2 行表头及第 3～14 行数据；不换算功耗单位，同名列冲突时报错。
-所有模式均保留源模型及功耗文件，输出位置必须尚不存在。
+所有模式均保留源模型及功耗文件；通用模式删除已有输出目录后重建，旧 --summary 模式拒绝覆盖输出文件。
 数据转移量 = 每个运算节点输入（包含权重/偏置）及输出字节数之和。
 中间张量的写入和读取分别计入；动态形状或未知类型保留已知部分并标注不完整。
 """
@@ -30,6 +30,8 @@ from decimal import Decimal, InvalidOperation
 import json
 import math
 import re
+import shutil
+import stat
 import sys
 from pathlib import Path, PurePosixPath
 from zipfile import BadZipFile
@@ -508,12 +510,33 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
     powers_root = Path(power_dir).resolve() if power_dir is not None else None
     if powers_root is not None and not powers_root.is_dir():
         raise NotADirectoryError(powers_root)
-    if output.exists():
-        raise FileExistsError(f"输出目录已存在，请指定新目录：{output}")
     sweep = ddr_sweep or (powers_root is not None and any(
         p.is_file() and p.suffix.lower() in {".csv", ".xlsx"}
         and re.fullmatch(r"[1-9]\d*-[1-9]", p.stem) for p in powers_root.iterdir()))
     numbering = number_models(root, numbering_csv)
+    # Resolve and validate all deletion targets before replacing generated output.
+    protected = [root, Path.cwd().resolve(), *[(root / r["OMC相对路径"]).resolve() for r in numbering]]
+    if powers_root is not None:
+        protected.append(powers_root)
+    if ge_proto_path is not None:
+        protected.append(Path(ge_proto_path).resolve())
+    if output == Path(output.anchor) or any(p == output or p.is_relative_to(output) for p in protected):
+        raise ValueError(f"输出目录包含输入数据或当前工作目录，拒绝删除：{output}")
+    target = Path(output_dir).absolute()
+    if target.is_symlink() or (target.exists() and getattr(target.lstat(), "st_file_attributes", 0)
+                               & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        raise ValueError(f"输出目录不能为链接：{target}")
+    if output.exists():
+        if not output.is_dir():
+            raise NotADirectoryError(output)
+        if __package__:
+            from .omc import _schema
+        else:
+            from omc import _schema
+        schema_path = Path(_schema(ge_proto_path)[3]).resolve()
+        if schema_path.is_relative_to(output):
+            raise ValueError(f"输出目录包含 GE schema，拒绝删除：{output}")
+        shutil.rmtree(output)
     compiled = analyze_compiled_subgraphs(root, output / "omc_stats", ge_proto_path=ge_proto_path)
     by_path = {Path(r["OMC文件"]).resolve(): r for r in compiled["records"]}
     with (output / "numbering.csv").open("w", encoding="utf-8-sig", newline="") as stream:
@@ -603,7 +626,7 @@ def main():
     mode.add_argument("--batch-dir", type=Path, help="通用模式：包含 slash_0/slash0 等子目录的 OMC 文件夹")
     mode.add_argument("--summary", type=Path, help="旧模式：代表子图 representatives_summary.csv")
     parser.add_argument("--power-dir", type=Path, help="通用模式读 N.csv 或 N-频点.csv（也支持 XLSX）；旧模式读 0.xlsx～56.xlsx")
-    parser.add_argument("--output-dir", type=Path, help="通用模式输出目录，必须尚不存在")
+    parser.add_argument("--output-dir", type=Path, help="通用模式输出目录；存在时删除整个目录并重新生成")
     parser.add_argument("--ge-proto", type=Path, help="通用模式：DDK 的 ge_ir_pb2.py")
     parser.add_argument("--numbering", type=Path, help="通用模式：复用已生成的 numbering.csv，校验文件 SHA256")
     parser.add_argument("--ddr-sweep", action="store_true",

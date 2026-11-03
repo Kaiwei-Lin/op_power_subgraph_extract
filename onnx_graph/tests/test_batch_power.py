@@ -306,10 +306,16 @@ class BatchPowerTests(unittest.TestCase):
         with patch("sys.argv", args), redirect_stdout(StringIO()) as printed:
             self.assertEqual(merge.main(), 0)
         self.assertIn("numbering.csv", printed.getvalue())
-        before = (self.output / "summary.csv").read_bytes()
-        with self.assertRaises(FileExistsError):
-            self.run_merge()
-        self.assertEqual((self.output / "summary.csv").read_bytes(), before)
+        stale = self.output / "stale" / "old.txt"
+        stale.parent.mkdir()
+        stale.write_text("old", encoding="utf-8")
+        self.run_merge(numbering_csv=self.output / "numbering.csv")
+        self.assertFalse(stale.exists())
+        self.assertTrue((self.output / "summary.csv").is_file())
+        for target in (self.models, self.powers, self.root):
+            with self.assertRaises(ValueError):
+                merge.merge_compiled_power(self.models, self.powers, target)
+        self.assertTrue((self.powers / "1.csv").is_file())
 
 
 if __name__ == "__main__":

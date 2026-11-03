@@ -1,10 +1,20 @@
 import math
 import unittest
+from pathlib import Path
+from unittest.mock import patch
+from onnx_graph import plot_ddr_power as plot
 
 from onnx_graph.plot_ddr_power import prepare_series, power_watts
 
 
 class PlotPowerTests(unittest.TestCase):
+    def test_cli_output_directory_is_optional(self):
+        with patch("sys.argv", ["plot", "--summary", "example/summary.csv"]), \
+                patch.object(plot, "plot_summary", return_value=[Path("example/chart.png"), Path("example/chart.svg")]) as draw, \
+                patch("builtins.print"):
+            plot.main()
+        self.assertIsNone(draw.call_args.args[1])
+
     def test_units_and_missing(self):
         self.assertAlmostEqual(power_watts("120 mW"), .12)
         self.assertAlmostEqual(power_watts(120, "mW"), .12)
