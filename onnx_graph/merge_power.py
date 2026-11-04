@@ -645,7 +645,7 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
         writer = csv.DictWriter(stream, fieldnames=["编号", "斜杠数", "OMC相对路径", "OMC_SHA256"])
         writer.writeheader()
         writer.writerows(numbering)
-    rows, channels, unused_power = [], [], []
+    rows, channels, unused_power, ignored_power = [], [], [], []
     jobs = []
     for item in numbering:
         stem = str(item["编号"])
@@ -667,6 +667,10 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
                    数据移动吞吐=None, 数据移动吞吐单位="B/s")
         if powers_root is not None:
             candidates = power_index.get(power_stem, [])
+            detailed_candidates = [p for p in candidates if "db" in p.stem.lower()]
+            if detailed_candidates:
+                ignored_power.extend(str(p) for p in candidates if p not in detailed_candidates)
+                candidates = detailed_candidates
             if not candidates:
                 row["功耗原因"] = f"缺少 {power_stem}.csv/.xlsx 或带 db 的详细功耗 XLSX，未知功耗不补零"
                 row["时长原因"] = f"缺少 {power_stem} 对应的功耗文件，未读取时长"
@@ -734,7 +738,7 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
                       "文件名忽略大小写全局升序，同名按相对路径升序；从 1 开始"),
                   omc_counts=compiled["counts"], power_counts=dict(Counter(r["功耗状态"] for r in rows)),
                   runtime_counts=dict(Counter(r["时长状态"] for r in rows)),
-                  unused_power_files=unused_power, records=rows)
+                  unused_power_files=unused_power, ignored_power_files=ignored_power, records=rows)
     (output / "summary.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
 

@@ -117,14 +117,45 @@ class BatchPowerTests(unittest.TestCase):
         self.assertNotIn((1, None), records)
         self.assertEqual({Path(p).name for p in result["unused_power_files"]}, {"1-10db.xlsx", "99_db.xlsx"})
 
-    def test_detailed_and_old_same_measurement_are_ambiguous(self):
+    def test_detailed_takes_priority_over_old_same_measurement(self):
         self.save_model("model.omc")
-        self.detailed_xlsx("1_db.xlsx")
-        self.power_csv(1)
+        detailed = self.detailed_xlsx("1_db.xlsx")
+        old = self.power_csv(1, {"VBUCK0_PERI": "99", "DDRPHY": "88"})
+        before = old.read_bytes()
+        result = self.run_merge()
+        row = result["records"][0]
+        self.assertEqual((row["功耗状态"], row["时长状态"]), ("ok", "ok"))
+        self.assertEqual(row["功耗文件"], str(detailed))
+        self.assertEqual(row["VBUCK0_PERI"], .2)
+        self.assertEqual(row["运行时长"], 2)
+        self.assertEqual(result["ignored_power_files"], [str(old)])
+        self.assertEqual(old.read_bytes(), before)
+
+    def test_detailed_ddr_priority_and_multiple_detailed_ambiguity(self):
+        self.save_model("model.omc")
+        self.detailed_xlsx("1-1db.xlsx")
+        self.power_csv("1-1", {"VBUCK0_PERI": "99", "DDRPHY": "88"})
+        self.power_csv("1-2", {"VBUCK0_PERI": "11", "DDRPHY": "22"})
+        result = self.run_merge()
+        self.assertEqual(result["records"][0]["VBUCK0_PERI"], .2)
+        self.assertEqual(result["records"][1]["VBUCK0_PERI"], "11")
+        self.assertEqual([Path(p).name for p in result["ignored_power_files"]], ["1-1.csv"])
+        self.detailed_xlsx("1-1_db.xlsx")
         row = self.run_merge()["records"][0]
         self.assertEqual((row["功耗状态"], row["时长状态"]), ("ambiguous", "ambiguous"))
-        self.assertIn("1_db.xlsx", row["功耗原因"])
-        self.assertIn("1.csv", row["功耗原因"])
+        self.assertIn("1-1db.xlsx", row["功耗原因"])
+        self.assertIn("1-1_db.xlsx", row["功耗原因"])
+
+    def test_failed_detailed_does_not_fall_back_to_old_power(self):
+        self.save_model("model.omc")
+        path = self.detailed_xlsx("1_db.xlsx", rows=[[0, "bad", .1], [1_000_000, .2, .3]])
+        old = self.power_csv(1)
+        result = self.run_merge()
+        row = result["records"][0]
+        self.assertEqual(row["功耗状态"], "failed")
+        self.assertEqual(row["功耗文件"], str(path))
+        self.assertNotIn("CPU", row)
+        self.assertEqual(result["ignored_power_files"], [str(old)])
 
     def test_detailed_timestamp_errors_do_not_discard_valid_power(self):
         self.save_model("model.omc")
