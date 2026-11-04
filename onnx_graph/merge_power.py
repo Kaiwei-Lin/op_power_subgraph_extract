@@ -10,7 +10,9 @@
 通用模式需要同目录的 compiled_stats.py、stats.py、omc.py 等解析模块。
 每个 OMC 按整个编译后运算图统计，输出算子数量、理论 FLOPs 和逐算子数据转移量。
 CSV 功耗读取 Channel/Power，取表头后前 12 条非空数据行，保留原值及单位。
-运行时长读取功耗文件 H1，单位 s；数据移动吞吐=完整转移字节数/时长，单位 B/s。
+详细功耗识别 N_db.xlsx / N-频点db.xlsx：只读首个 sheet，所有 [W] 列按采样值求均值。
+旧表运行时长读取 H1；详细表用末时间戳减首时间戳（us 转 s），即采样窗口跨度。
+数据移动吞吐=完整转移字节数/时长，单位 B/s。
 时长缺失、无效、为零或数据量不完整时，吞吐量保持空白。
 兼容同号 XLSX；仅读取 Excel 时需要 python -m pip install openpyxl。
 
@@ -498,6 +500,102 @@ def read_power_csv(path):
     return powers
 
 
+def _power_file_key(path):
+    """完整匹配模型编号/频点编号，避免模型 1 匹配到模型 10。"""
+    if path.suffix.lower() not in {".csv", ".xlsx"}:
+        return None
+    match = re.fullmatch(r"([1-9]\d*)(?:-([1-9]\d*))?([^\d]*)", path.stem)
+    if not match:
+        return None
+    model, frequency, suffix = match.groups()
+    if suffix and ("db" not in suffix.lower() or path.suffix.lower() != ".xlsx"):
+        return None
+    if frequency is not None and int(frequency) not in range(1, 10):
+        return None
+    return model + (f"-{frequency}" if frequency else "")
+
+
+def _sample_number(value, label):
+    if isinstance(value, bool):
+        raise ValueError(f"{label} 不是有效数值：{value!r}")
+    try:
+        number = Decimal(str(value).strip())
+    except InvalidOperation as error:
+        raise ValueError(f"{label} 不是有效数值：{value!r}") from error
+    if not number.is_finite():
+        raise ValueError(f"{label} 不是有限数值：{value!r}")
+    return number
+
+
+def read_detailed_power(path):
+    """只读首个 worksheet；返回功耗均值/错误和时间戳跨度秒数/错误。"""
+    path = Path(path)
+    if load_workbook is None:
+        raise ValueError("读取详细功耗 XLSX 需要：python -m pip install openpyxl")
+    with path.open("rb") as source:
+        book = load_workbook(source, read_only=True, data_only=True)
+        try:
+            sheet = book.worksheets[0]
+            sheet.reset_dimensions()
+            rows = sheet.iter_rows(values_only=True)
+            header = next((r for r in rows if any(v is not None and str(v).strip() for v in r)), ())
+            columns = {}
+            for index, value in enumerate(header[1:], 1):
+                title = str(value or "")
+                if "[W]" not in title:
+                    continue
+                channel = title.split("[W]", 1)[0].strip()
+                if not channel or channel in columns:
+                    raise ValueError(f"{path.name}: [W] 前的 Channel 为空或重复：{channel!r}")
+                columns[channel] = index
+            if not columns:
+                raise ValueError(f"{path.name}: 第一张工作表没有 [W] 功耗列")
+            totals = {c: Decimal(0) for c in columns}
+            counts = dict.fromkeys(columns, 0)
+            first = last = None
+            timestamps = 0
+            power_error = runtime_error = ""
+            for row_number, row in enumerate(rows, 2):
+                if not any(v is not None and str(v).strip() for v in row):
+                    continue
+                if not runtime_error:
+                    try:
+                        current = _sample_number(row[0], f"第 {row_number} 行时间戳 (us)")
+                        if last is not None and current <= last:
+                            raise ValueError(f"第 {row_number} 行时间戳重复或倒序；需要严格递增的 us 时间戳")
+                        first = current if first is None else first
+                        last = current
+                        timestamps += 1
+                    except ValueError as error:
+                        runtime_error = str(error)
+                if not power_error:
+                    try:
+                        for channel, index in columns.items():
+                            value = row[index] if index < len(row) else None
+                            if value is None or (isinstance(value, str) and not value.strip()):
+                                continue
+                            totals[channel] += _sample_number(value, f"第 {row_number} 行 {channel}[W]")
+                            counts[channel] += 1
+                    except ValueError as error:
+                        power_error = str(error)
+            empty = [c for c, n in counts.items() if not n]
+            if empty and not power_error:
+                power_error = "没有有效功耗采样值：" + ", ".join(empty)
+            powers = {} if power_error else {c: float(totals[c] / counts[c]) for c in columns}
+            if any(not math.isfinite(v) for v in powers.values()):
+                powers, power_error = {}, "功耗均值超出可表示范围"
+            seconds = None
+            if not runtime_error and timestamps >= 2:
+                seconds = float((last - first) / Decimal(1_000_000))
+                if not math.isfinite(seconds) or seconds <= 0:
+                    seconds, runtime_error = None, "时间戳跨度超出可表示范围"
+            elif not runtime_error:
+                runtime_error = "不足两个有效时间戳，无法确定运行时长"
+            return powers, power_error, seconds, runtime_error
+        finally:
+            book.close()
+
+
 def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None, numbering_csv=None,
                          ddr_sweep=False):
     """动态编号、OMC 整图统计、同号/多频点功耗合并；缺失功耗保留空值及原因。"""
@@ -505,14 +603,18 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
         from .compiled_stats import analyze_compiled_subgraphs, number_models
     else:
         from compiled_stats import analyze_compiled_subgraphs, number_models
-    from collections import Counter
+    from collections import Counter, defaultdict
     root, output = Path(batch_dir).resolve(), Path(output_dir).resolve()
     powers_root = Path(power_dir).resolve() if power_dir is not None else None
     if powers_root is not None and not powers_root.is_dir():
         raise NotADirectoryError(powers_root)
-    sweep = ddr_sweep or (powers_root is not None and any(
-        p.is_file() and p.suffix.lower() in {".csv", ".xlsx"}
-        and re.fullmatch(r"[1-9]\d*-[1-9]", p.stem) for p in powers_root.iterdir()))
+    power_files = sorted(p for p in powers_root.iterdir() if p.is_file()) if powers_root is not None else []
+    power_index = defaultdict(list)
+    for path in power_files:
+        key = _power_file_key(path)
+        if key is not None:
+            power_index[key].append(path)
+    sweep = ddr_sweep or any("-" in key for key in power_index)
     numbering = number_models(root, numbering_csv)
     # Resolve and validate all deletion targets before replacing generated output.
     protected = [root, Path.cwd().resolve(), *[(root / r["OMC相对路径"]).resolve() for r in numbering]]
@@ -547,8 +649,7 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
     jobs = []
     for item in numbering:
         stem = str(item["编号"])
-        if not sweep or (powers_root is not None and any(
-                (powers_root / f"{stem}{ext}").is_file() for ext in (".csv", ".xlsx"))):
+        if not sweep or stem in power_index:
             jobs.append((item, stem, None, None))
         if sweep:
             jobs.extend((item, f"{stem}-{index}", index, mhz)
@@ -565,18 +666,31 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
         row.update(运行时长=None, 运行时长单位="s", 时长状态="missing", 时长原因="尚未提供功耗目录",
                    数据移动吞吐=None, 数据移动吞吐单位="B/s")
         if powers_root is not None:
-            candidates = [p for suffix in (".csv", ".xlsx") if (p := powers_root / f"{power_stem}{suffix}").is_file()]
+            candidates = power_index.get(power_stem, [])
             if not candidates:
-                row["功耗原因"] = f"缺少 {power_stem}.csv（或 .xlsx），未知功耗不补零"
-                row["时长原因"] = f"缺少 {power_stem}.csv（或 .xlsx），未读取 H1"
+                row["功耗原因"] = f"缺少 {power_stem}.csv/.xlsx 或带 db 的详细功耗 XLSX，未知功耗不补零"
+                row["时长原因"] = f"缺少 {power_stem} 对应的功耗文件，未读取时长"
             elif len(candidates) > 1:
-                row.update(功耗状态="ambiguous", 功耗原因="同一编号同时存在 CSV 和 XLSX，请保留一个对应文件")
-                row.update(时长状态="ambiguous", 时长原因="同一编号同时存在 CSV 和 XLSX，无法确定时长来源")
+                reason = "同一编号/频点存在多个功耗文件，请保留一个：" + ", ".join(p.name for p in candidates)
+                row.update(功耗状态="ambiguous", 功耗原因=reason)
+                row.update(时长状态="ambiguous", 时长原因=reason)
             else:
                 path = candidates[0]
                 row["功耗文件"] = str(path)
+                detailed = "db" in path.stem.lower()
+                detail = None
+                if detailed:
+                    try:
+                        detail = read_detailed_power(path)
+                    except (OSError, ValueError, BadZipFile, InvalidFileException) as error:
+                        detail = ({}, str(error), None, str(error))
                 try:
-                    values = read_power_csv(path) if path.suffix.lower() == ".csv" else read_power(path)
+                    if detailed:
+                        values, power_error, _, _ = detail
+                        if power_error:
+                            raise ValueError(power_error)
+                    else:
+                        values = read_power_csv(path) if path.suffix.lower() == ".csv" else read_power(path)
                     if set(values) & set(row):
                         raise ValueError(f"Channel 与统计列同名：{sorted(set(values) & set(row))}")
                     channels.extend(c for c in values if c not in channels)
@@ -585,7 +699,12 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
                 except (OSError, ValueError, BadZipFile, InvalidFileException) as error:
                     row.update(功耗状态="failed", 功耗原因=str(error))
                 try:
-                    seconds = read_runtime_seconds(path)
+                    if detailed:
+                        _, _, seconds, runtime_error = detail
+                        if runtime_error:
+                            raise ValueError(runtime_error)
+                    else:
+                        seconds = read_runtime_seconds(path)
                     if seconds is None:
                         row["时长原因"] = "H1 为空或缺少第一行第八列；若为公式，请先计算并保存"
                     else:
@@ -601,9 +720,9 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
         if row["功耗状态"] == "ok" and any(c not in row for c in channels):
             row.update(功耗状态="incomplete", 功耗原因="缺少 Channel：" + ", ".join(c for c in channels if c not in row))
     if powers_root is not None:
-        expected = {f"{stem}{ext}" for _, stem, _, _ in jobs for ext in (".csv", ".xlsx")}
-        unused_power = [str(p) for p in sorted(powers_root.iterdir())
-                        if p.is_file() and p.suffix.lower() in {".csv", ".xlsx"} and p.name.lower() not in expected]
+        expected = {stem for _, stem, _, _ in jobs}
+        unused_power = [str(p) for p in power_files
+                        if p.suffix.lower() in {".csv", ".xlsx"} and _power_file_key(p) not in expected]
     base_fields = list(dict.fromkeys(k for row in rows for k in row if k not in channels and k != "operator_counts"))
     headers = ["编号", "斜杠数", "OMC相对路径", *[f for f in base_fields if f not in {"编号", "斜杠数", "OMC相对路径"}], *channels]
     with (output / "summary.csv").open("w", encoding="utf-8-sig", newline="") as stream:
@@ -625,12 +744,12 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--batch-dir", type=Path, help="通用模式：包含 slash_0/slash0 等子目录的 OMC 文件夹")
     mode.add_argument("--summary", type=Path, help="旧模式：代表子图 representatives_summary.csv")
-    parser.add_argument("--power-dir", type=Path, help="通用模式读 N.csv 或 N-频点.csv（也支持 XLSX）；旧模式读 0.xlsx～56.xlsx")
+    parser.add_argument("--power-dir", type=Path, help="通用模式：N.csv/N-频点.csv，或详细 N_db.xlsx/N-频点db.xlsx；旧模式读 0.xlsx～56.xlsx")
     parser.add_argument("--output-dir", type=Path, help="通用模式输出目录；存在时删除整个目录并重新生成")
     parser.add_argument("--ge-proto", type=Path, help="通用模式：DDK 的 ge_ir_pb2.py")
     parser.add_argument("--numbering", type=Path, help="通用模式：复用已生成的 numbering.csv，校验文件 SHA256")
     parser.add_argument("--ddr-sweep", action="store_true",
-                        help="通用模式：为每个 OMC 生成 9 个 DDR 频点行；发现 N-1.csv～N-9.csv 时自动启用")
+                        help="通用模式：为每个 OMC 生成 9 个 DDR 频点行；发现 N-频点.csv/.xlsx 或 N-频点db.xlsx 时自动启用")
     parser.add_argument("--stats-dir", type=Path, help="统计目录：stats_<数字>_slash.csv 和完整 stats.json")
     parser.add_argument("-o", "--output", type=Path, help="输出 CSV；默认后缀为 _with_power 或 _with_power_stats")
     args = parser.parse_args()

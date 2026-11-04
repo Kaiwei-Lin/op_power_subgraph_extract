@@ -48,6 +48,111 @@ class BatchPowerTests(unittest.TestCase):
         return merge.merge_compiled_power(self.models, self.powers, self.output,
                                            ge_proto_path=self.schema_path, **kwargs)
 
+    def detailed_xlsx(self, name, headers=None, rows=None):
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            self.skipTest("详细 XLSX 功耗测试需要 openpyxl")
+        book = Workbook()
+        sheet = book.active
+        sheet.title = "Work1.db"
+        sheet.append(headers or ["Timestamp[us]", " VBUCK0_PERI [W]", "DDRPHY[W]", "CPU[A]", "CPU[V]"])
+        for values in (rows if rows is not None else [[1_000_000, 0, .1, 999, 888],
+                                                     [1_500_000, .2, .3, 777, 666],
+                                                     [3_000_000, .4, .5, 555, 444]]):
+            sheet.append(values)
+        other = book.create_sheet("Average Values Work0.db")
+        other.append(["Timestamp[us]", "VBUCK0_PERI[W]", "DDRPHY[W]"])
+        other.append([0, 999, 888])
+        path = self.powers / name
+        book.save(path)
+        book.close()
+        return path
+
+    def test_detailed_xlsx_first_sheet_means_and_us_duration(self):
+        self.save_model("model.omc")
+        path = self.detailed_xlsx("1_db.xlsx")
+        before = path.read_bytes()
+        row = self.run_merge()["records"][0]
+        self.assertEqual(row["功耗状态"], "ok")
+        self.assertAlmostEqual(row["VBUCK0_PERI"], .2)
+        self.assertAlmostEqual(row["DDRPHY"], .3)
+        self.assertNotIn("CPU", row)
+        self.assertNotIn("DDR频率_MHz", row)
+        self.assertEqual((row["运行时长"], row["数据移动吞吐"]), (2, 48))
+        self.assertEqual(path.read_bytes(), before)
+        with (self.output / "summary.csv").open(encoding="utf-8-sig", newline="") as stream:
+            saved = next(csv.DictReader(stream))
+        self.assertEqual(saved["VBUCK0_PERI"], "0.2")
+
+    def test_detailed_all_samples_channels_and_partial_empty_cells(self):
+        headers = ["Time(us)", *[f"CH_{i}[W]" for i in range(14)], "Other[mW]", "Other[V]"]
+        rows = [[1_000_000 + n * 25_000, *[n if i else None for i in range(14)], 999, 999] for n in range(30)]
+        rows[0][1] = 0
+        path = self.detailed_xlsx("1_db.xlsx", headers, rows)
+        values, power_error, seconds, runtime_error = merge.read_detailed_power(path)
+        self.assertEqual((power_error, runtime_error), ("", ""))
+        self.assertEqual(len(values), 14)
+        self.assertEqual(values["CH_0"], 0)
+        self.assertEqual(values["CH_13"], 14.5)
+        self.assertEqual(seconds, .725)
+
+    def test_detailed_ddr_matches_exact_model_and_frequency_and_mixes_old_format(self):
+        for i in range(10):
+            self.save_model(f"m_{i:02}.omc")
+        self.detailed_xlsx("1-1db.xlsx")
+        self.detailed_xlsx("1-9_DB.xlsx", rows=[[0, .4, .2], [1_000_000, .8, .4]])
+        self.detailed_xlsx("10_db.xlsx")
+        self.power_csv(2, {"VBUCK0_PERI": "0.2", "DDRPHY": "0.3"})
+        (self.powers / "1-10db.xlsx").write_bytes(b"invalid frequency")
+        (self.powers / "99_db.xlsx").write_bytes(b"unknown model")
+        result = self.run_merge()
+        records = {(r["编号"], r["DDR频点编号"]): r for r in result["records"]}
+        self.assertEqual(records[1, 1]["DDR频率_MHz"], 418)
+        self.assertEqual(records[1, 9]["DDR频率_MHz"], 4253)
+        self.assertEqual(records[1, 1]["功耗状态"], "ok")
+        self.assertEqual(records[1, 9]["VBUCK0_PERI"], .6)
+        self.assertEqual(records[10, None]["功耗状态"], "ok")
+        self.assertEqual(records[2, None]["VBUCK0_PERI"], "0.2")
+        self.assertNotIn((1, None), records)
+        self.assertEqual({Path(p).name for p in result["unused_power_files"]}, {"1-10db.xlsx", "99_db.xlsx"})
+
+    def test_detailed_and_old_same_measurement_are_ambiguous(self):
+        self.save_model("model.omc")
+        self.detailed_xlsx("1_db.xlsx")
+        self.power_csv(1)
+        row = self.run_merge()["records"][0]
+        self.assertEqual((row["功耗状态"], row["时长状态"]), ("ambiguous", "ambiguous"))
+        self.assertIn("1_db.xlsx", row["功耗原因"])
+        self.assertIn("1.csv", row["功耗原因"])
+
+    def test_detailed_timestamp_errors_do_not_discard_valid_power(self):
+        self.save_model("model.omc")
+        for times in ([2, 1], [1, 1], [None, 2], ["NaN", 2], [0]):
+            with self.subTest(times=times):
+                self.detailed_xlsx("1_db.xlsx", rows=[[t, .2, .3] for t in times])
+                row = self.run_merge()["records"][0]
+                self.assertEqual(row["功耗状态"], "ok")
+                self.assertEqual(row["VBUCK0_PERI"], .2)
+                self.assertEqual(row["时长状态"], "failed")
+                self.assertIsNone(row["运行时长"])
+                self.assertIsNone(row["数据移动吞吐"])
+
+    def test_detailed_power_errors_do_not_discard_valid_duration(self):
+        self.save_model("model.omc")
+        for value in ("NaN", "inf", "bad", True, "#DIV/0!", None):
+            with self.subTest(value=value):
+                self.detailed_xlsx("1_db.xlsx", rows=[[0, value, .3], [1_000_000, value, .3]])
+                row = self.run_merge()["records"][0]
+                self.assertEqual(row["功耗状态"], "failed")
+                self.assertEqual(row["时长状态"], "ok")
+                self.assertEqual(row["运行时长"], 1)
+        for headers in (["Time", "CPU[A]"], ["Time", "CPU[W]", "CPU [W]"], ["Time", "[W]"]):
+            with self.subTest(headers=headers):
+                path = self.detailed_xlsx("1_db.xlsx", headers=headers, rows=[[0, 1, 2], [1, 3, 4]])
+                with self.assertRaises(ValueError):
+                    merge.read_detailed_power(path)
+
     def set_csv_runtime(self, path, value):
         with path.open(encoding="utf-8-sig", newline="") as stream:
             rows = list(csv.reader(stream))
