@@ -511,6 +511,18 @@ for level in report["levels"]:
 
 ## 通用 OMC 编号、功耗合并与模型统计
 
+### 单图比较吞吐率与所有 Channel 的平均功耗
+
+```powershell
+python -m onnx_graph.plot_channel_throughput --summary D:/results/summary.csv
+# 可选：增删组件，只比较某个固定 DDR 频率下的测量
+python -m onnx_graph.plot_channel_throughput --summary D:/results/summary.csv --channels VBUCK0_PERI VBUCK1_1V12 DDRPHY --ddr-frequency 418
+```
+
+输出一张散点图（300 DPI `channels_power_vs_throughput.png` 和矢量 `.pdf`），默认与 summary 同目录，也可指定 `--output-dir`。横轴为数据移动吞吐率 **GB/s**（B/s 除以 10⁹），纵轴为各 Channel 平均功耗 **mW**（输入默认 W，乘以 1000）；`--display-power-unit W` 可切换显示单位。`--power-unit` 只控制无单位输入值，`--throughput-unit` 用于表内未注明单位的情况，均不修改源表。
+
+默认使用 merge_power 总表中 `数据移动吞吐单位` 之后的全部 Channel 列；也支持此前示例 XLSX 的吞吐率列后各组件，其他自定义列顺序请用 `--channels` 明确指定。CSV/XLSX 都支持，XLSX 默认第一张 sheet，`--sheet` 可指定。不同 Channel 用不同颜色，每个点是一条模型测量记录；无频点的旧总表也能画。有频点的表默认显示全部频率，`--ddr-frequency` 按 MHz 筛选并生成带频率后缀的图。缺失吞吐率/功耗的配对跳过，零值保留；无有效配对时报错。散点不做平滑或拟合，不跨频率连接测量点。混合频率下的分布仅用于观察，固定频率比较请使用筛选参数或论文四宫格脚本。
+
 ### 详细采样功耗 XLSX（带 db 的文件名）
 
 通用 `merge_power.py --batch-dir ... --power-dir ...` 自动支持 `1_db.xlsx`（模型 1，无频率）和 `1-1db.xlsx`（模型 1，频点 1，即 418 MHz）；也支持 `1-1_db.xlsx`。按开头的完整模型编号及可选 `-频点编号` 匹配，后缀包含 `db`（忽略大小写）表示详细采样表，模型 1 不会匹配到模型 10。不需要新的命令参数；编号、目录结构和 9 个频点的对应关系保持不变。需要 `python -m pip install openpyxl`。
