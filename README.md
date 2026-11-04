@@ -59,7 +59,7 @@ op_power_subgraph_extract/
 | `onnx_graph/compiled_stats.py` | 对目录内每个已编译 OMC 整图统计，可关联代表子图总表 | 输出 `omc_summary.csv/.json` 及各 OMC 的明细；同时提供通用编号函数 |
 | `onnx_graph/merge_power.py` | OMC 编号与统计，合并旧平均功耗表或新 db 采样 XLSX，支持 9 个 DDR 频点 | 输出 `numbering.csv`、`summary.csv/.json` 和 `omc_stats/` |
 | `onnx_graph/plot_ddr_power.py` | 画每个模型的 DDR 频率—功耗折线图、所有模型总览和跨模型功耗极差图 | 输入 summary CSV/XLSX；输出 PNG/SVG，默认功耗单位 mW |
-| `onnx_graph/plot_channel_throughput.py` | 在同一坐标系比较全部或指定 Channel 的平均功耗与吞吐率 | 输入 summary；输出一张散点图的 PNG/PDF，默认 GB/s 和 mW |
+| `onnx_graph/plot_channel_throughput.py` | 在同一坐标系比较 DDR 相关或指定 Channel 的平均功耗与吞吐率 | 输入 summary；输出一张折线图的 PNG/PDF，默认 GB/s 和 mW |
 | `onnx_graph/plot_power_throughput.py` | 论文用固定 DDR 频率的跨模型吞吐率—功耗四宫格及统计分析 | 输出 300 DPI PNG、矢量 PDF、功耗差异 CSV、逐频率相关性 CSV 和校验 JSON；功耗用 W |
 | `onnx_graph/plot_power_waveform.py` | 读取指定 db XLSX，画单个 Channel 的原始功耗随时间的波形 | 输入详细采样文件和 Channel；输出 PNG/PDF，默认时间 ms、功耗 mW |
 | `onnx_graph/verify_mobilenet.py` | 使用指定 MobileNetV3 样例验证完整往返和子图数值结果 | 需要本机样例模型与 `onnxruntime`；输出验证用 ONNX、NetworkX 文件和报告 |
@@ -566,7 +566,7 @@ python -m onnx_graph.plot_ddr_power --summary D:/results/summary.csv --channels 
 - 缺失点断线，极差不足两个有效模型时也断线；不补零。无频率记录跳过，同一模型/频点重复时报错。
 - 输出 PNG 和 SVG，默认与 summary 同目录，`--output-dir` 可修改。输入数字默认 W；`--power-unit mW` 表示无单位输入数字原本是 mW，不是设置显示单位。
 
-### plot_channel_throughput.py：全部 Channel 的吞吐率—功耗单图
+### plot_channel_throughput.py：DDR 相关 Channel 的吞吐率—功耗折线图
 
 ```powershell
 python -m onnx_graph.plot_channel_throughput --summary D:/results/summary.csv
@@ -575,11 +575,11 @@ python -m onnx_graph.plot_channel_throughput --summary D:/results/summary.csv
 python -m onnx_graph.plot_channel_throughput --summary D:/results/summary.csv --channels VBUCK0_PERI DDRPHY --ddr-frequency 418
 ```
 
-每个点为一条模型测量记录，不同 Channel 用不同颜色。X 轴自动换算到 GB/s（十进制），Y 轴默认从 W 换算成 mW，可用 `--display-power-unit W` 切换。
+每个 Channel 一条带数据点的折线，按吞吐率从小到大连接测量记录，不同 Channel 用不同颜色。相同吞吐率的记录保留原始顺序，不对其求均值。X 轴自动换算到 GB/s（十进制），Y 轴默认从 W 换算成 mW，可用 `--display-power-unit W` 切换。
 
-默认选择 merge_power 总表中 `数据移动吞吐单位` 之后的全部 Channel 列；也兼容此前示例 XLSX 的吞吐率列之后的组件。自定义列顺序时用 `--channels` 指定。无 DDR 字段的旧总表也能画；有频率时可筛选。
+默认仅绘制 `VBUCK0_PERI`、`VBUCK1_1V12`、`DDRPHY`，也可修改脚本顶部 `CHANNELS` 或通过 `--channels` 增删组件、调整图例顺序。兼容 summary CSV 和此前示例的 XLSX 括号说明列名。无 DDR 字段的旧总表也能画；有频率时可筛选。
 
-输出 `channels_power_vs_throughput.png/.pdf`（PNG 300 DPI），默认与 summary 同目录。筛选频率时文件名增加频率后缀。缺失配对跳过，零值保留；不拟合、不平滑、不把不同频率强行连线。混合频率散点用于观察整体分布，不能直接当作固定频率下的因果关系。
+输出 `channels_power_vs_throughput.png/.pdf`（PNG 300 DPI），默认与 summary 同目录。筛选频率时文件名增加频率后缀。缺失配对跳过，零值保留，不拟合或平滑。未指定频率时，将全部测量按吞吐率排序连接，因此可能跨模型和频率；连线仅辅助观察，不能当作固定频率下的因果关系。需要固定频率比较时传入 `--ddr-frequency`。
 
 ### plot_power_throughput.py：固定频率论文四宫格
 
@@ -665,7 +665,7 @@ python -m onnx_graph.verify_mobilenet
 | `test_batch_power.py` | 动态编号、九频点、新 db 首表/全部采样均值、us 时长、db 优先级、旧格式兼容、吞吐和目录覆盖保护 |
 | `test_merge_power.py` | 旧固定编号 56 子图 + 整模型 Excel 合并，以及数据移动量、缺失值、冲突和文件保护 |
 | `test_plot_ddr_power.py` | 单位、缺失和重复点、统一 Y 轴、总览及按频率/组件计算极差 |
-| `test_channel_throughput.py` | 自动识别 Channel、组件/频率筛选、缺失与零值、单位换算、单图散点和默认输出目录 |
+| `test_channel_throughput.py` | 默认 DDR Channel 与自定义组件、频率筛选、缺失与零值、单位换算、排序折线、图例和默认输出目录 |
 | `test_power_throughput.py` | 论文图输入的单位、重复模型/频点校验，相关性正负方向及常量/不足样本 |
 | `test_power_waveform.py` | db 第一张 sheet、Channel 匹配、原始采样和断线、时间戳检查、ms/mW 换算和源文件只读 |
 

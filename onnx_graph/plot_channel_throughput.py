@@ -13,6 +13,9 @@ else:
     from plot_power_throughput import column
 
 
+CHANNELS = ["VBUCK0_PERI", "VBUCK1_1V12", "DDRPHY"]
+
+
 def channel_points(headers, rows, channels=None, *, ddr_frequency=None, throughput_unit=None,
                    bare_power_unit="W"):
     throughput_col = column(headers, ["数据移动吞吐", "数据移动吞吐率", "数据移动吞吐率(B/s)"])
@@ -23,11 +26,9 @@ def channel_points(headers, rows, channels=None, *, ddr_frequency=None, throughp
         if frequency_col is None:
             raise ValueError("此表没有 DDR 频率列，无法按频率筛选")
     if channels is None:
-        # merge_power 将所有 Channel 列附在最后一个元数据列之后。
-        last_metadata = "数据移动吞吐单位" if "数据移动吞吐单位" in headers else throughput_col
-        channels = headers[headers.index(last_metadata) + 1:]
+        channels = CHANNELS
     if not channels or len(set(channels)) != len(channels):
-        raise ValueError("无法自动识别 Channel 或组件列表重复，请用 --channels 指定")
+        raise ValueError("Channel 列表不能为空或重复，请用 --channels 指定")
     columns = {c: column(headers, [c]) for c in channels}
     labels = {c: re.split(r"\[W\]|[（(]", c, maxsplit=1)[0].strip() for c in channels}
     if any(not c for c in labels.values()) or len(set(labels.values())) != len(labels):
@@ -77,10 +78,10 @@ def plot_summary(source, output_dir=None, channels=None, *, sheet=None, ddr_freq
         colors = plt.get_cmap("tab10" if len(points) <= 10 else "tab20" if len(points) <= 20 else "turbo")
         scale = 1000 if display_power_unit == "mW" else 1
         for i, (channel, values) in enumerate(points.items()):
-            values = sorted(values)
+            values = sorted(values, key=lambda p: p[0])
             color = colors(i if len(points) <= 20 else i / max(len(points) - 1, 1))
-            ax.scatter([p[0] for p in values], [p[1] * scale for p in values],
-                       label=channel, color=color, s=38, alpha=.8, edgecolors="white", linewidths=.4)
+            ax.plot([p[0] for p in values], [p[1] * scale for p in values],
+                    label=channel, color=color, marker="o", markersize=4, linewidth=1.5, alpha=.85)
         title = "Mean channel power vs. data movement throughput"
         if ddr_frequency is not None:
             title += f"\nDDR frequency: {ddr_frequency:g} MHz"
@@ -104,7 +105,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--summary", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, help="默认 summary 所在目录，覆盖同名图")
-    parser.add_argument("--channels", nargs="+", help="默认绘制 summary 中全部 Channel；可增删")
+    parser.add_argument("--channels", nargs="+", default=CHANNELS,
+                        help="默认 VBUCK0_PERI VBUCK1_1V12 DDRPHY；可增删")
     parser.add_argument("--sheet", help="XLSX 默认读取第一张工作表")
     parser.add_argument("--ddr-frequency", type=float, help="只画指定 DDR 频率（MHz）")
     parser.add_argument("--throughput-unit", choices=["B/s", "MB/s", "GB/s"], help="表中未注明时的输入吞吐率单位")
