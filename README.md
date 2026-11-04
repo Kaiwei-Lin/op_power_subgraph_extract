@@ -511,6 +511,17 @@ for level in report["levels"]:
 
 ## 通用 OMC 编号、功耗合并与模型统计
 
+### 指定 db 和 Channel 的功耗波形
+
+```powershell
+python -m onnx_graph.plot_power_waveform --db D:/power/1_db.xlsx --channel DDRPHY
+python -m onnx_graph.plot_power_waveform --db D:/power/1-1db.xlsx --channel VBUCK0_PERI --output-dir D:/results/waveforms
+```
+
+脚本读取详细 XLSX 的第一张 sheet，以第一列 **us 时间戳** 为横轴、指定 Channel 的 `[W]` 采样列为纵轴，画出原始功耗随时间变化的波形。支持 `--channel DDRPHY` 或完整列名 `--channel "DDRPHY[W]"`；找不到唯一列时列出可选名称。默认显示从首个时间戳开始的 **ms** 和 **mW**（自动换算），`--time-unit us/ms/s`、`--power-unit W/mW` 可更改显示单位。此处 `--power-unit` 是显示单位，原始 `[W]` 列始终按 W 解析。
+
+默认输出到输入文件所在目录，生成 `<文件名>_<channel>_waveform.png`（300 DPI）和矢量 PDF；支持 `--output-dir`，仅覆盖同名图。需要 Matplotlib 和 openpyxl。逐点绘制，不取平均、不平滑、不重排时间戳；空功耗单元格保留为断线，不补零。非数值/非有限功耗及缺失、重复或倒序时间戳报错；只读源文件，不修改原始数据。
+
 ### 单图比较吞吐率与所有 Channel 的平均功耗
 
 ```powershell
