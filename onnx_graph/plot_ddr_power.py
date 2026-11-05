@@ -136,11 +136,13 @@ def plot_summary(source, output_dir=None, channels=None, *, sheet=None, bare_uni
             ax.plot(FREQUENCIES, values, marker="o", linewidth=2, markersize=5, label=channel)
         title = Path(model.replace("\\", "/")).name
         import textwrap
-        ax.set_title("\n".join(textwrap.wrap(title, 70)), fontsize=12, pad=14)
-        ax.set_xlabel("DDR frequency (MHz)")
-        ax.set_ylabel("Power (mW)")
+        ax.set_title("\n".join(textwrap.wrap(title, 45)), fontsize=20, pad=6)
+        ax.set_xlabel("DDR frequency (MHz)", fontsize=22, labelpad=4)
+        ax.set_ylabel("Power (mW)", fontsize=22, labelpad=4)
         ax.set_xticks(FREQUENCIES)
-        ax.tick_params(axis="x", labelrotation=35)
+        ax.tick_params(axis="both", labelsize=18, pad=3)
+        ax.tick_params(axis="x", labelrotation=30)
+        ax.margins(x=.02)
         ax.grid(alpha=0.22)
         ax.spines[["top", "right"]].set_visible(False)
         ax.set_ylim(lower, upper)
@@ -149,14 +151,14 @@ def plot_summary(source, output_dir=None, channels=None, *, sheet=None, bare_uni
     def save(fig, stem):
         for ext in ("png", "svg"):
             path = output / f"{stem}.{ext}"
-            fig.savefig(path, dpi=180, bbox_inches="tight")
+            fig.savefig(path, dpi=300, bbox_inches="tight", pad_inches=.03)
             files.append(path)
         plt.close(fig)
 
     for model, points in sorted(groups.items()):
         fig, ax = plt.subplots(figsize=(11, 6), layout="constrained")
         draw(ax, model, points)
-        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.23), ncol=min(4, len(channels)), frameon=False)
+        ax.legend(loc="best", fontsize=16, facecolor="white", edgecolor="#dddddd", framealpha=.85)
         title = Path(model.replace("\\", "/")).name
         stem = re.sub(r"[^\w.-]", "_", title)[:100] + "_" + sha256(model.encode()).hexdigest()[:10]
         save(fig, stem)
@@ -167,22 +169,24 @@ def plot_summary(source, output_dir=None, channels=None, *, sheet=None, bare_uni
     for ax, (model, points) in zip(axes.flat, sorted(groups.items())):
         draw(ax, model, points)
         ax.tick_params(labelleft=True, labelbottom=True)
+        ax.tick_params(axis="x", labelrotation=75)
     for ax in list(axes.flat)[len(groups):]:
         ax.set_visible(False)
     handles, labels = axes.flat[0].get_legend_handles_labels()
-    fig.suptitle("DDR power comparison — shared Y axis", fontsize=16)
-    fig.legend(handles, labels, loc="outside lower center", ncol=min(4, len(channels)), frameon=False)
+    fig.suptitle("DDR power comparison — shared Y axis", fontsize=22)
+    fig.legend(handles, labels, loc="outside lower center", ncol=min(4, 2 * columns, len(channels)),
+               frameon=False, fontsize=16, columnspacing=1)
     save(fig, "all_models_ddr_power")
     differences = power_ranges(groups, len(channels))
     fig, ax = plt.subplots(figsize=(11, 6), layout="constrained")
     draw(ax, "Power range across models (max - min)", differences)
-    ax.set_ylabel("Power difference (mW)")
+    ax.set_ylabel("Power difference (mW)", fontsize=22, labelpad=4)
     finite = [v for point in differences.values() for v in point if math.isfinite(v)]
     # 极差采用独立纵轴，避免绝对功耗的统一范围掩盖差异。
     ax.set_yticks([])
     ax.set_ylim(0, max(max(finite, default=0) * 1.05, 0.01))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.23), ncol=min(4, len(channels)), frameon=False)
+    ax.legend(loc="best", fontsize=16, facecolor="white", edgecolor="#dddddd", framealpha=.85)
     save(fig, "all_models_power_range")
     return files
 

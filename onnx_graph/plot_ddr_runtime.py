@@ -68,44 +68,48 @@ def plot_summary(source, output_dir=None, *, sheet=None, time_unit=None):
     files = []
 
     def decorate(ax, title):
-        ax.set_title(title, pad=12)
+        ax.set_title(title, pad=6)
         ax.set_xlabel("DDR frequency (MHz)")
         ax.set_ylabel("Execution time (ms)")
         ax.set_xticks(FREQUENCIES)
-        ax.tick_params(axis="x", labelrotation=35)
-        ax.margins(y=.1)
+        ax.tick_params(axis="both", pad=3)
+        ax.tick_params(axis="x", labelrotation=30)
+        ax.margins(x=.02, y=.1)
         ax.grid(alpha=.2, linewidth=.6)
         ax.spines[["top", "right"]].set_visible(False)
 
     def save(fig, stem):
         for extension in ("png", "pdf"):
             path = output / f"{stem}.{extension}"
-            fig.savefig(path, dpi=300)
+            fig.savefig(path, dpi=300, bbox_inches="tight", pad_inches=.03)
             files.append(path)
         plt.close(fig)
 
-    with plt.rc_context({"font.sans-serif": ["Microsoft YaHei", "DejaVu Sans"], "pdf.fonttype": 42}):
+    with plt.rc_context({"font.sans-serif": ["Microsoft YaHei", "DejaVu Sans"], "pdf.fonttype": 42,
+                         "font.size": 18, "axes.titlesize": 20, "axes.labelsize": 22,
+                         "xtick.labelsize": 18, "ytick.labelsize": 18, "axes.labelpad": 4,
+                         "legend.fontsize": 16, "legend.title_fontsize": 16}):
         for model, points in sorted(groups.items()):
             fig, ax = plt.subplots(figsize=(10, 5.5), layout="constrained")
             values = [points.get(frequency, math.nan) for frequency in FREQUENCIES]
             ax.plot(FREQUENCIES, values, color="#2673b8", marker="o", linewidth=1.8, markersize=5)
             title = Path(model.replace("\\", "/")).name
-            decorate(ax, "\n".join(textwrap.wrap(title, 75)))
+            decorate(ax, "\n".join(textwrap.wrap(title, 55)))
             if not any(math.isfinite(t) for t in values):
                 ax.text(.5, .5, "No valid runtime measurements", ha="center", va="center", transform=ax.transAxes)
             stem = re.sub(r"[^\w.-]", "_", title)[:90] + "_" + sha256(model.encode()).hexdigest()[:10]
             save(fig, f"{stem}_ddr_runtime")
-        fig, ax = plt.subplots(figsize=(12, max(6, len(groups) * .25)), layout="constrained")
+        fig, ax = plt.subplots(figsize=(12, max(6, len(groups) * .4)), layout="constrained")
         colors = plt.get_cmap("tab10" if len(groups) <= 10 else "tab20" if len(groups) <= 20 else "turbo")
         markers = ["o", "s", "^", "D", "v", "P", "X", "<", ">", "p", "h", "*"]
         for index, (model, points) in enumerate(sorted(groups.items())):
             values = [points.get(frequency, math.nan) for frequency in FREQUENCIES]
             color = colors(index if len(groups) <= 20 else index / max(len(groups) - 1, 1))
             ax.plot(FREQUENCIES, values, color=color, marker=markers[index % len(markers)],
-                    linewidth=1.6, markersize=4, label=textwrap.fill(model, 55))
+                    linewidth=1.6, markersize=4, label=textwrap.fill(model, 40))
         decorate(ax, "Execution time across DDR frequencies")
         ax.legend(title="Model", loc="best", frameon=True, facecolor="white",
-                  edgecolor="#dddddd", framealpha=.85, fontsize=8)
+                  edgecolor="#dddddd", framealpha=.85)
         save(fig, "all_models_ddr_runtime")
     return files
 
