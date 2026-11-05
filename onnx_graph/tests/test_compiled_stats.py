@@ -75,6 +75,7 @@ class CompiledStatisticsTests(unittest.TestCase):
         row = result["records"][0]
         self.assertEqual((row["节点数"], row["FLOPs"], row["已知exec_time"]), ("99", "999", "12.5"))
         self.assertEqual((row["OMC_节点数"], row["OMC_FLOPs"], row["OMC_Add数量"]), (2, 8, 2))
+        self.assertEqual((row["OMC_cube_FLOPs"], row["OMC_vector_FLOPs"]), (0, 8))
         self.assertEqual((row["OMC_输入及权重字节数"], row["OMC_输出字节数"], row["OMC_数据转移字节数"]), (64, 32, 96))
         detail = json.loads(Path(row["OMC统计JSON"]).read_text(encoding="utf-8"))
         self.assertEqual(detail["source_format"], "OMC")
@@ -87,6 +88,7 @@ class CompiledStatisticsTests(unittest.TestCase):
         with (self.output / "omc_summary.csv").open(encoding="utf-8-sig", newline="") as stream:
             saved = list(csv.DictReader(stream))
         self.assertEqual(saved[0]["OMC_Add数量"], "2")
+        self.assertEqual((saved[0]["OMC_cube_FLOPs"], saved[0]["OMC_vector_FLOPs"]), ("0", "8"))
         self.assertEqual((model.read_bytes(), summary.read_bytes()), before)
 
     def test_unknown_shapes_and_operators_keep_unknown_and_known_parts(self):
@@ -96,6 +98,9 @@ class CompiledStatisticsTests(unittest.TestCase):
         self.assertIsNone(row["OMC_FLOPs"])
         self.assertEqual(row["OMC_已知FLOPs"], 4)
         self.assertEqual(row["OMC_未知计算量节点数"], 1)
+        self.assertIsNone(row["OMC_cube_FLOPs"])
+        self.assertIsNone(row["OMC_vector_FLOPs"])
+        self.assertEqual((row["OMC_已知cube_FLOPs"], row["OMC_已知vector_FLOPs"]), (0, 4))
         self.assertIsNone(row["OMC_数据转移字节数"])
         self.assertEqual(row["OMC_已知数据转移字节数"], 48)
         self.assertEqual(row["OMC_未知数据转移节点数"], 1)

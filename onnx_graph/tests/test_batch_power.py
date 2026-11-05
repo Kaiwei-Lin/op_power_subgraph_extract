@@ -267,6 +267,8 @@ class BatchPowerTests(unittest.TestCase):
             self.assertEqual(row["OMC名字"], "a.omc" if model == 1 else "b.omc")
             self.assertEqual(row["NPU"], str(model * 100 + index))
             self.assertEqual((row["OMC_Add数量"], row["OMC_FLOPs"], row["OMC_数据转移字节数"]), (2, 8, 96))
+            self.assertEqual((row["cube_FLOPs"], row["vector_FLOPs"]), (0, 8))
+            self.assertEqual(row["cube_FLOPs"] + row["vector_FLOPs"], row["OMC_FLOPs"])
             self.assertEqual(row["运行时长"], index / 2)
             self.assertAlmostEqual(row["数据移动吞吐"], 192 / index)
         with (self.output / "summary.csv").open(encoding="utf-8-sig", newline="") as stream:
@@ -407,7 +409,32 @@ class BatchPowerTests(unittest.TestCase):
         self.assertEqual(row["运行时长"], 2)
         self.assertIsNone(row["OMC_数据转移字节数"])
         self.assertGreater(row["OMC_已知数据转移字节数"], 0)
+        self.assertIsNone(row["cube_FLOPs"])
+        self.assertIsNone(row["vector_FLOPs"])
+        self.assertEqual((row["已知cube_FLOPs"], row["已知vector_FLOPs"]), (0, 4))
         self.assertIsNone(row["数据移动吞吐"])
+
+    def test_cube_vector_summary_columns_keep_nonzero_matrix_and_scalar_work(self):
+        model = self.Model(name="cube_vector")
+        graph = model.graph.add(name="root")
+        for name, dims in (("x", (2, 3)), ("w", (3, 4))):
+            data = graph.op.add(name=name, type="Data")
+            fixtures.fixture.tensor(data.output_desc.add(), dims)
+        matmul = graph.op.add(name="matmul", type="MatMul", input=["x:0", "w:0"])
+        fixtures.fixture.tensor(matmul.input_desc.add(), (2, 3))
+        fixtures.fixture.tensor(matmul.input_desc.add(), (3, 4))
+        fixtures.fixture.tensor(matmul.output_desc.add(), (2, 4))
+        add = graph.op.add(name="add", type="Add", input=["matmul:0", "matmul:0"])
+        for desc in (add.input_desc.add(), add.input_desc.add(), add.output_desc.add()):
+            fixtures.fixture.tensor(desc, (2, 4))
+        (self.models / "matrix.omc").write_bytes(fixtures.fixture.container(model))
+        self.power_csv(1)
+        row = self.run_merge()["records"][0]
+        self.assertEqual((row["OMC_FLOPs"], row["cube_FLOPs"], row["vector_FLOPs"]), (56, 48, 8))
+        self.assertEqual((row["已知cube_FLOPs"], row["已知vector_FLOPs"]), (48, 8))
+        with (self.output / "summary.csv").open(encoding="utf-8-sig", newline="") as stream:
+            saved = next(csv.DictReader(stream))
+        self.assertEqual((saved["cube_FLOPs"], saved["vector_FLOPs"]), ("48", "8"))
 
     def test_xlsx_runtime_uses_h1_from_the_selected_average_sheet(self):
         try:

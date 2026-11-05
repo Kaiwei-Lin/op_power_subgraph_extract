@@ -656,6 +656,8 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
                         for index, mhz in enumerate(DDR_FREQUENCIES_MHZ, 1))
     for item, power_stem, frequency_index, mhz in jobs:
         row = dict(by_path[(root / item["OMC相对路径"]).resolve()])
+        for field in ("cube_FLOPs", "vector_FLOPs", "已知cube_FLOPs", "已知vector_FLOPs"):
+            row[field] = row.pop("OMC_" + field)
         if row["OMC状态"] == "ok" and row["OMC_SHA256"] != item["OMC_SHA256"]:
             raise ValueError(f"统计期间 OMC 文件发生变化：{item['OMC相对路径']}")
         row.update(item)

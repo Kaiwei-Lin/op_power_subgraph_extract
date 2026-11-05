@@ -4,6 +4,7 @@ import networkx as nx
 
 from onnx_graph.merge_power import transfer_statistics
 from onnx_graph.omc import _cost, _resolved_inputs, statistics_nodes
+from onnx_graph.stats import _totals
 
 
 def tensor(shape, dtype="DT_FLOAT16"):
@@ -20,6 +21,37 @@ def graph(op, inputs, outputs, attrs=None):
 
 
 class GeCostTests(unittest.TestCase):
+    def test_cube_vector_split_includes_bias_and_fused_activation_in_vector(self):
+        gemm = graph("GemmD", [[2, 3], [3, 4], [4]], [[2, 4]],
+                     {"alpha": 1., "beta": 1., "relu_flag": True})
+        nodes, _ = statistics_nodes(gemm)
+        total = _totals(nodes)
+        self.assertEqual((total["flops"], total["cube_flops"], total["vector_flops"]), (64, 48, 16))
+        conv = graph("Convolution", [[1, 2, 4, 4], [3, 2, 3, 3], [3]], [[1, 3, 2, 2]],
+                     {"groups": 1, "relu_flag": True})
+        conv.add_node(0, op_type="Const", constant_tensor=tensor([3, 2, 3, 3]))
+        conv.add_edge(0, 1, input_index=1, output_index=0, control=False)
+        nodes, _ = statistics_nodes(conv)
+        total = _totals(nodes)
+        self.assertEqual((total["flops"], total["cube_flops"], total["vector_flops"]), (456, 432, 24))
+        nodes, _ = statistics_nodes(graph("Add", [[2, 4], [2, 4]], [[2, 4]]))
+        vector = _totals(nodes)
+        self.assertEqual((vector["cube_flops"], vector["vector_flops"]), (0, 8))
+        nodes, _ = statistics_nodes(graph("Reshape", [], []))
+        movement = _totals(nodes)
+        self.assertEqual((movement["cube_flops"], movement["vector_flops"]), (0, 0))
+
+    def test_cube_vector_unknown_keeps_known_components_without_zero_filling(self):
+        known, _ = statistics_nodes(graph("MatMul", [[2, 3], [3, 4]], [[2, 4]]))
+        unknown, _ = statistics_nodes(graph("FusionOpNode", [[2, 4]], [[2, 4]],
+                                           {"_kernel_name": "fused_matmul_add"}))
+        unknown[0]["node_id"] = 2
+        total = _totals(known + unknown)
+        self.assertIsNone(total["cube_flops"])
+        self.assertIsNone(total["vector_flops"])
+        self.assertEqual((total["known_cube_flops"], total["known_vector_flops"]), (48, 0))
+        self.assertEqual(total["known_cube_flops"] + total["known_vector_flops"], total["known_flops"])
+
     def test_matrix_multiply_batch_transpose_bias_and_shape_validation(self):
         for op, a, b, y, attrs, bias, expected in [
                 ("BatchMatMul", [2, 3, 4], [1, 4, 5], [2, 3, 5], {}, None, (120, 240)),

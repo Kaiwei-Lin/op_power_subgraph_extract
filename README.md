@@ -515,6 +515,8 @@ output_dir/
 | `OMC名字`、`DDR频点编号`、`DDR频率_MHz` | 多频点模式附加的身份与频率 |
 | `OMC_节点数`、`OMC_<算子>数量` | 编译后运算节点的统计 |
 | `OMC_FLOPs`、`OMC_MACs` | 完整可估算的计算量；有未知算子时留空 |
+| `cube_FLOPs`、`vector_FLOPs` | 将 OMC 理论 FLOPs 拆为矩阵/卷积乘加部分与其余标量操作；完整时两者之和等于 `OMC_FLOPs` |
+| `已知cube_FLOPs`、`已知vector_FLOPs` | 有未知算子时仍保留可计算部分，两者之和等于 `OMC_已知FLOPs` |
 | `OMC_已知FLOPs`、`OMC_未知计算量节点数` 等 | 部分已知的计算量及覆盖情况 |
 | `OMC_输入及权重字节数`、`OMC_输出字节数`、`OMC_数据转移字节数` | 逐算子逻辑读写量，单位 Byte |
 | `OMC_已知数据转移字节数`、`OMC_数据转移量完整` 等 | 未知描述符情况下的已知部分和完整性 |
@@ -543,6 +545,19 @@ output_dir/
 这些是**逻辑字节数和估算吞吐率**，没有模拟缓存、片上复用、物理填充、内存对齐或额外 DMA，不能直接等同实测 DDR 流量/带宽。数据移动量“完整”只表示参与统计的可见描述符可计算，不表示已还原融合节点内部所有读写。
 
 FLOPs 按一次稠密推理估算，1 MAC = 2 FLOPs，偏置及逐元素运算另计。部分移动/形状算子计 0 FLOPs，但仍可能有搬运和时间开销。未知形状、未支持算子、无法可靠还原的 FusionOpNode 计算量保留未知；不把未知算作 0。算子数量为对应输入图的节点类型数量，OMC 融合节点数量不是原始 ONNX 算子数量。
+
+Cube/Vector 按理论算术类型拆分，保持原有总 FLOPs 不变：
+
+```text
+cube_FLOPs   = 2 × MACs
+vector_FLOPs = FLOPs - 2 × MACs
+```
+
+卷积、MatMul/BatchMatMul/Gemm 等的乘加部分计入 Cube；偏置、融合 ReLU、逐元素运算、激活、归一化、池化、Softmax 等现有公式中的其余操作计入 Vector。该拆分描述逻辑计算量，不推断实际内核被安排到哪个硬件单元，也不包含物理补齐或重复执行开销。举例：Gemm 的乘加为 48 FLOPs、偏置为 8 FLOPs，则 Cube=48、Vector=8、总量=56。
+
+只要有未知计算量节点（例如不透明 FusionOpNode），完整 `cube_FLOPs` 和 `vector_FLOPs` 均留空；`已知cube_FLOPs`、`已知vector_FLOPs` 单独统计已知节点，不将部分值冒充完整值。`stats.json` 的 total/子图汇总中对应 `cube_flops`、`vector_flops`、`known_cube_flops`、`known_vector_flops`。独立 `compiled_stats.py` 的 OMC 总表使用 `OMC_cube_FLOPs` 等带 `OMC_` 的列名以区分原 ONNX 统计；最终功耗 `summary.csv` 使用上面的无前缀列名。九频点的每一行复用所属 OMC 的静态拆分结果。
+
+更新 `stats.py`、`compiled_stats.py` 和 `merge_power.py` 后，用原命令重新生成 summary 即可，不需要新参数。已有 CSV 不会自动迁移。
 
 三种时间不能混用：profiling `exec_time` 是算子均值之和（us）；旧功耗 H1 是文件记录的时长（s）；新 db 时长是时间戳采样跨度（us 转 s）。均不自动推定推理循环次数。
 

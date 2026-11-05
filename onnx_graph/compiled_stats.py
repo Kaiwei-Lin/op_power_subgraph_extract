@@ -24,6 +24,7 @@ GE_PROTO_PATH = None  # DDK ge_ir_pb2.py，也可设置 ONNX_GRAPH_GE_PROTO。
 
 _FIELDS = ["OMC文件", "OMC状态", "OMC原因", "OMC统计JSON", "OMC统计TXT", "OMC_SHA256",
            "OMC_节点数", "OMC_MACs", "OMC_FLOPs", "OMC_已知MACs", "OMC_已知FLOPs",
+           "OMC_cube_FLOPs", "OMC_vector_FLOPs", "OMC_已知cube_FLOPs", "OMC_已知vector_FLOPs",
            "OMC_计算量完整", "OMC_未知计算量节点数", *["OMC_" + f for f in TRANSFER_FIELDS]]
 
 
@@ -161,6 +162,9 @@ def analyze_compiled_subgraphs(omc_dir, output_dir, *, summary_csv=None, ge_prot
                            OMC_MACs=total["macs"], OMC_FLOPs=total["flops"], OMC_已知MACs=total["known_macs"],
                            OMC_已知FLOPs=total["known_flops"], OMC_计算量完整="是" if total["complete"] else "否",
                            OMC_未知计算量节点数=len(total["unknown_node_ids"]))
+                row.update(OMC_cube_FLOPs=total["cube_flops"], OMC_vector_FLOPs=total["vector_flops"],
+                           OMC_已知cube_FLOPs=total["known_cube_flops"],
+                           OMC_已知vector_FLOPs=total["known_vector_flops"])
                 row.update({"OMC_" + k: v for k, v in transfer.items()})
                 row["operator_counts"] = total["operator_counts"]
                 operators.update(total["operator_counts"])

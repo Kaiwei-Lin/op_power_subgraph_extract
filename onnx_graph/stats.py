@@ -40,6 +40,8 @@ CONVENTIONS = [
     "形状/索引/数据搬移算子按 0 FLOPs 计；这不代表无内存开销或无耗时。",
     "仅统计主图节点；控制流、未支持的算子及缺失形状记为未知，不计为零。",
     "每个层级单独分组；跨层级的结果包含重复节点，不可相加。层级过浅或无可用层级的节点列为未分组。",
+    "Cube/Vector 为理论算术拆分：cube_FLOPs=2×MACs，vector_FLOPs=FLOPs-2×MACs；"
+    "偏置、融合激活等归入 Vector，不代表编译后实际执行单元或指令数。",
 ]
 
 _MOVEMENT_OPS = {
@@ -224,6 +226,9 @@ def _totals(nodes, include_time=False):
         "known_macs": macs, "known_flops": flops,
         "macs": None if unknown else macs, "flops": None if unknown else flops,
         "complete": not unknown, "unknown_node_ids": unknown,
+        "cube_flops": None if unknown else 2 * macs,
+        "vector_flops": None if unknown else flops - 2 * macs,
+        "known_cube_flops": 2 * macs, "known_vector_flops": flops - 2 * macs,
     }
     if include_time:
         result.update(time_totals(nodes, result["flops"]))
