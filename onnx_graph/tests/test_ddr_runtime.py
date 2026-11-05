@@ -55,7 +55,7 @@ class DdrRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "没有有效"):
             plot.prepare_runtime_series(headers, [dict(rows[0], 运行时长="")])
 
-    def test_each_model_has_nine_sorted_ticks_shared_scale_and_default_output(self):
+    def test_adaptive_individual_axes_and_combined_model_lines(self):
         try:
             from matplotlib.figure import Figure
         except ImportError:
@@ -64,12 +64,13 @@ class DdrRuntimeTests(unittest.TestCase):
         figures = []
         def capture(fig, *args, **kwargs):
             ax = fig.axes[0]
-            line = ax.lines[0]
             self.assertEqual(ax.get_ylabel(), "Execution time (ms)")
-            self.assertEqual(list(line.get_xdata()), list(plot.FREQUENCIES))
+            for line in ax.lines:
+                self.assertEqual(list(line.get_xdata()), list(plot.FREQUENCIES))
             self.assertEqual(list(ax.get_xticks()), list(plot.FREQUENCIES))
             self.assertEqual(kwargs["dpi"], 300)
-            figures.append((list(line.get_ydata()), ax.get_ylim()))
+            figures.append(([list(line.get_ydata()) for line in ax.lines], ax.get_ylim(),
+                            ax.get_legend_handles_labels()[1]))
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             source = Path(directory) / "summary.csv"
             with source.open("w", encoding="utf-8-sig", newline="") as stream:
@@ -79,17 +80,27 @@ class DdrRuntimeTests(unittest.TestCase):
             before = source.read_bytes()
             with patch.object(Figure, "savefig", capture):
                 files = plot.plot_summary(source)
-            self.assertEqual(len(files), 4)
+            self.assertEqual(len(files), 6)
             self.assertTrue(all(p.parent == source.parent for p in files))
-            self.assertEqual(len({p.name for p in files}), 4)
+            self.assertEqual(len({p.name for p in files}), 6)
+            self.assertEqual(files[-2].name, "all_models_ddr_runtime.png")
+            self.assertEqual(files[-1].name, "all_models_ddr_runtime.pdf")
             self.assertEqual(source.read_bytes(), before)
-        self.assertEqual(figures[0][0][:2], [30, 20])
-        self.assertTrue(math.isnan(figures[0][0][2]))
-        self.assertTrue(all(limits == figures[0][1] for _, limits in figures))
+        self.assertEqual(figures[0][0][0][:2], [30, 20])
+        self.assertTrue(math.isnan(figures[0][0][0][2]))
+        self.assertNotEqual(figures[0][1], figures[2][1])
+        self.assertGreater(figures[0][1][0], 0)
+        self.assertEqual(len(figures[-1][0]), 2)
+        self.assertEqual(figures[-1][2], ["a/model.omc", "b/model.omc"])
+        self.assertEqual(figures[-1][0][0][:2], [30, 20])
+        self.assertTrue(math.isnan(figures[-1][0][0][2]))
+        self.assertEqual(figures[-1][0][1][0], 0)
 
     def test_cli_output_directory_is_optional(self):
         with patch("sys.argv", ["plot", "--summary", "summary.csv"]), \
-                patch.object(plot, "plot_summary", return_value=[Path("figure.png"), Path("figure.pdf")]) as draw, \
+                patch.object(plot, "plot_summary", return_value=[Path("figure.png"), Path("figure.pdf"),
+                                                               Path("all_models_ddr_runtime.png"),
+                                                               Path("all_models_ddr_runtime.pdf")]) as draw, \
                 patch("builtins.print"):
             plot.main()
         self.assertIsNone(draw.call_args.args[1])

@@ -60,7 +60,7 @@ op_power_subgraph_extract/
 | `onnx_graph/compiled_stats.py` | 对目录内每个已编译 OMC 整图统计，可关联代表子图总表 | 输出 `omc_summary.csv/.json` 及各 OMC 的明细；同时提供通用编号函数 |
 | `onnx_graph/merge_power.py` | OMC 编号与统计，合并旧平均功耗表或新 db 采样 XLSX，支持 9 个 DDR 频点 | 输出 `numbering.csv`、`summary.csv/.json` 和 `omc_stats/` |
 | `onnx_graph/plot_ddr_power.py` | 画每个模型的 DDR 频率—功耗折线图、所有模型总览和跨模型功耗极差图 | 输入 summary CSV/XLSX；输出 PNG/SVG，默认功耗单位 mW |
-| `onnx_graph/plot_ddr_runtime.py` | 画同一模型不同 DDR 频率的执行时间折线图，每个模型一张 | 输入 summary CSV/XLSX；输出 PNG/PDF，纵轴 ms，同次运行统一 Y 轴范围 |
+| `onnx_graph/plot_ddr_runtime.py` | 各模型的 DDR 频率—执行时间图，以及所有模型曲线叠加的总图 | 输入 summary CSV/XLSX；输出 PNG/PDF，纵轴 ms，各图自适应 Y 轴范围 |
 | `onnx_graph/plot_channel_throughput.py` | 在同一坐标系比较 DDR 相关或指定 Channel 的平均功耗与吞吐率 | 输入 summary；输出一张折线图的 PNG/PDF，默认 GB/s 和 mW |
 | `onnx_graph/plot_power_throughput.py` | 论文用固定 DDR 频率的跨模型吞吐率—功耗四宫格及统计分析 | 输出 300 DPI PNG、矢量 PDF、功耗差异 CSV、逐频率相关性 CSV 和校验 JSON；功耗用 W |
 | `onnx_graph/plot_power_waveform.py` | 读取指定 db XLSX，画单个 Channel 的原始功耗随时间的波形 | 输入详细采样文件和 Channel；输出 PNG/PDF，默认时间 ms、功耗 mW |
@@ -584,7 +584,7 @@ python -m onnx_graph.plot_ddr_power --summary D:/results/summary.csv --channels 
 - 缺失点断线，极差不足两个有效模型时也断线；不补零。无频率记录跳过，同一模型/频点重复时报错。
 - 输出 PNG 和 SVG，默认与 summary 同目录，`--output-dir` 可修改。输入数字默认 W；`--power-unit mW` 表示无单位输入数字原本是 mW，不是设置显示单位。
 
-### plot_ddr_runtime.py：每个模型的 DDR 频率—执行时间折线图
+### plot_ddr_runtime.py：各模型的 DDR 频率—执行时间图与总图
 
 ```powershell
 python -m onnx_graph.plot_ddr_runtime --summary D:/results/summary.csv
@@ -592,7 +592,9 @@ python -m onnx_graph.plot_ddr_runtime --summary D:/results/summary.csv
 python -m onnx_graph.plot_ddr_runtime --summary D:/results/summary.csv --output-dir D:/results/runtime_plots
 ```
 
-每个模型输出一张独立折线图的 PNG（300 DPI）和矢量 PDF，文件名带 `_ddr_runtime` 后缀，不覆盖功耗图。X 轴按数值顺序固定显示 9 个 DDR 频率（MHz），Y 轴为执行时间 **ms**，同次运行的模型图使用相同 Y 轴范围。按 OMC 相对路径区分模型，同名模型位于不同目录时生成不同文件名。
+每个模型输出一张独立折线图的 PNG（300 DPI）和矢量 PDF，文件名带 `_ddr_runtime` 后缀，不覆盖功耗图。X 轴按数值顺序固定显示 9 个 DDR 频率（MHz），Y 轴为执行时间 **ms**，每张图按自身数据自适应 Y 轴范围。按 OMC 相对路径区分模型，同名模型位于不同目录时生成不同文件名。
+
+同时输出 `all_models_ddr_runtime.png/.pdf` 总图，将全部模型的执行时间曲线叠加在同一坐标系中，用不同颜色、marker 和模型图例区分，便于直接比较。总图的 Y 轴按全部模型的数据自适应。
 
 默认读取 merge_power 总表的 `运行时长` 和 `运行时长单位`，将秒乘以 1000 显示为毫秒，不重新计算或推定单次推理时间。也支持 `执行时间`、带 `(s)/(ms)/(us)` 单位的时间列；输入单位未知时必须通过 `--time-unit s/ms/us` 指定。XLSX 默认第一张 sheet，可用 `--sheet` 指定。命令的 `--time-unit` 控制输入解释，图上始终显示 ms。
 
@@ -697,7 +699,7 @@ python -m onnx_graph.verify_mobilenet
 | `test_batch_power.py` | 动态编号、九频点、新 db 首表/全部采样均值、us 时长、db 优先级、旧格式兼容、吞吐和目录覆盖保护 |
 | `test_merge_power.py` | 旧固定编号 56 子图 + 整模型 Excel 合并，以及数据移动量、缺失值、冲突和文件保护 |
 | `test_plot_ddr_power.py` | 单位、缺失和重复点、统一 Y 轴、总览及按频率/组件计算极差 |
-| `test_ddr_runtime.py` | 按模型分组、频率排序、秒/毫秒/微秒换算、重复和异常时间、缺失断线、零值和默认输出目录 |
+| `test_ddr_runtime.py` | 按模型分组、频率排序、时间单位换算、重复和异常时间、缺失断线、零值、自适应 Y 轴、总图曲线和默认输出目录 |
 | `test_channel_throughput.py` | 默认 DDR Channel 与自定义组件、频率筛选、缺失与零值、单位换算、排序折线、图例和默认输出目录 |
 | `test_power_throughput.py` | 论文图输入的单位、重复模型/频点校验，相关性正负方向及常量/不足样本 |
 | `test_power_waveform.py` | db 第一张 sheet、Channel 匹配、原始采样和断线、时间戳检查、ms/mW 换算和源文件只读 |

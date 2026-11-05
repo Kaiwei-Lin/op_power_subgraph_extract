@@ -1,4 +1,4 @@
-"""根据 summary CSV/XLSX 为每个模型绘制 DDR 频率—执行时间折线图。"""
+"""根据 summary CSV/XLSX 绘制各模型 DDR 频率—执行时间图及全部模型对比图。"""
 
 import argparse
 from hashlib import sha256
@@ -60,35 +60,52 @@ def prepare_runtime_series(headers, rows, time_unit=None):
 def plot_summary(source, output_dir=None, *, sheet=None, time_unit=None):
     headers, rows = read_table(source, sheet)
     groups = prepare_runtime_series(headers, rows, time_unit)
-    maximum = max(t for points in groups.values() for t in points.values() if math.isfinite(t))
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     output = Path(output_dir) if output_dir is not None else Path(source).resolve().parent
     output.mkdir(parents=True, exist_ok=True)
     files = []
+
+    def decorate(ax, title):
+        ax.set_title(title, pad=12)
+        ax.set_xlabel("DDR frequency (MHz)")
+        ax.set_ylabel("Execution time (ms)")
+        ax.set_xticks(FREQUENCIES)
+        ax.tick_params(axis="x", labelrotation=35)
+        ax.margins(y=.1)
+        ax.grid(alpha=.2, linewidth=.6)
+        ax.spines[["top", "right"]].set_visible(False)
+
+    def save(fig, stem):
+        for extension in ("png", "pdf"):
+            path = output / f"{stem}.{extension}"
+            fig.savefig(path, dpi=300)
+            files.append(path)
+        plt.close(fig)
+
     with plt.rc_context({"font.sans-serif": ["Microsoft YaHei", "DejaVu Sans"], "pdf.fonttype": 42}):
         for model, points in sorted(groups.items()):
             fig, ax = plt.subplots(figsize=(10, 5.5), layout="constrained")
             values = [points.get(frequency, math.nan) for frequency in FREQUENCIES]
             ax.plot(FREQUENCIES, values, color="#2673b8", marker="o", linewidth=1.8, markersize=5)
             title = Path(model.replace("\\", "/")).name
-            ax.set_title("\n".join(textwrap.wrap(title, 75)), pad=12)
-            ax.set_xlabel("DDR frequency (MHz)")
-            ax.set_ylabel("Execution time (ms)")
-            ax.set_xticks(FREQUENCIES)
-            ax.tick_params(axis="x", labelrotation=35)
-            ax.set_ylim(0, max(maximum * 1.05, .001))
-            ax.grid(alpha=.2, linewidth=.6)
-            ax.spines[["top", "right"]].set_visible(False)
+            decorate(ax, "\n".join(textwrap.wrap(title, 75)))
             if not any(math.isfinite(t) for t in values):
                 ax.text(.5, .5, "No valid runtime measurements", ha="center", va="center", transform=ax.transAxes)
             stem = re.sub(r"[^\w.-]", "_", title)[:90] + "_" + sha256(model.encode()).hexdigest()[:10]
-            for extension in ("png", "pdf"):
-                path = output / f"{stem}_ddr_runtime.{extension}"
-                fig.savefig(path, dpi=300)
-                files.append(path)
-            plt.close(fig)
+            save(fig, f"{stem}_ddr_runtime")
+        fig, ax = plt.subplots(figsize=(12, max(6, len(groups) * .25)), layout="constrained")
+        colors = plt.get_cmap("tab10" if len(groups) <= 10 else "tab20" if len(groups) <= 20 else "turbo")
+        markers = ["o", "s", "^", "D", "v", "P", "X", "<", ">", "p", "h", "*"]
+        for index, (model, points) in enumerate(sorted(groups.items())):
+            values = [points.get(frequency, math.nan) for frequency in FREQUENCIES]
+            color = colors(index if len(groups) <= 20 else index / max(len(groups) - 1, 1))
+            ax.plot(FREQUENCIES, values, color=color, marker=markers[index % len(markers)],
+                    linewidth=1.6, markersize=4, label=textwrap.fill(model, 55))
+        decorate(ax, "Execution time across DDR frequencies")
+        ax.legend(title="Model", loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
+        save(fig, "all_models_ddr_runtime")
     return files
 
 
@@ -100,7 +117,7 @@ def main():
     parser.add_argument("--time-unit", choices=["s", "ms", "us"], help="输入时间未注明单位时使用；纵轴始终显示 ms")
     args = parser.parse_args()
     files = plot_summary(args.summary, args.output_dir, sheet=args.sheet, time_unit=args.time_unit)
-    print(f"已生成 {len(files) // 2} 个模型的 DDR 频率—执行时间图（PNG/PDF）：{files[0].parent.resolve()}")
+    print(f"已生成 {len(files) // 2 - 1} 个模型的独立图和总图（PNG/PDF）：{files[0].parent.resolve()}")
 
 
 if __name__ == "__main__":
