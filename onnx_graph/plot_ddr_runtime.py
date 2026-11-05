@@ -104,7 +104,8 @@ def plot_summary(source, output_dir=None, *, sheet=None, time_unit=None):
             ax.plot(FREQUENCIES, values, color=color, marker=markers[index % len(markers)],
                     linewidth=1.6, markersize=4, label=textwrap.fill(model, 55))
         decorate(ax, "Execution time across DDR frequencies")
-        ax.legend(title="Model", loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
+        ax.legend(title="Model", loc="best", frameon=True, facecolor="white",
+                  edgecolor="#dddddd", framealpha=.85, fontsize=8)
         save(fig, "all_models_ddr_runtime")
     return files
 

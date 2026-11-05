@@ -594,7 +594,7 @@ python -m onnx_graph.plot_ddr_runtime --summary D:/results/summary.csv --output-
 
 每个模型输出一张独立折线图的 PNG（300 DPI）和矢量 PDF，文件名带 `_ddr_runtime` 后缀，不覆盖功耗图。X 轴按数值顺序固定显示 9 个 DDR 频率（MHz），Y 轴为执行时间 **ms**，每张图按自身数据自适应 Y 轴范围。按 OMC 相对路径区分模型，同名模型位于不同目录时生成不同文件名。
 
-同时输出 `all_models_ddr_runtime.png/.pdf` 总图，将全部模型的执行时间曲线叠加在同一坐标系中，用不同颜色、marker 和模型图例区分，便于直接比较。总图的 Y 轴按全部模型的数据自适应。
+同时输出 `all_models_ddr_runtime.png/.pdf` 总图，将全部模型的执行时间曲线叠加在同一坐标系中，用不同颜色、marker 和模型图例区分，便于直接比较。总图的 Y 轴按全部模型的数据自适应。图例放在坐标系内部，自动选择遮挡曲线较少的位置，使用半透明白色背景。
 
 默认读取 merge_power 总表的 `运行时长` 和 `运行时长单位`，将秒乘以 1000 显示为毫秒，不重新计算或推定单次推理时间。也支持 `执行时间`、带 `(s)/(ms)/(us)` 单位的时间列；输入单位未知时必须通过 `--time-unit s/ms/us` 指定。XLSX 默认第一张 sheet，可用 `--sheet` 指定。命令的 `--time-unit` 控制输入解释，图上始终显示 ms。
 
