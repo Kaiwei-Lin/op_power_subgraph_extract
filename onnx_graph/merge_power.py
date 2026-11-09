@@ -677,8 +677,6 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
             power_index[key].append(path)
     sweep = ddr_sweep or any("-" in key for key in power_index)
     numbering = number_models(root, numbering_csv)
-    if originals_path is not None and sweep:
-        raise ValueError("--originals-dir 只支持无频点的原始模型合并")
     # Resolve and validate all deletion targets before replacing generated output.
     protected = [root, Path.cwd().resolve(), *[(root / r["OMC相对路径"]).resolve() for r in numbering]]
     if powers_root is not None:
@@ -734,8 +732,13 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
         row.update(item)
         row.update(bandwidth_fields(bandwidth_index, item["OMC_SHA256"], mhz))
         if originals_path is not None:
-            row["实测带宽原因"] = "目录中没有该模型编号的 statistics.csv"
-            row.update(original_stats.get(int(item["编号"]), {}))
+            if not sweep or frequency_index == 2:
+                row["实测带宽原因"] = "目录中没有该模型编号的 statistics.csv"
+                measured = original_stats.get(int(item["编号"]))
+                if measured is not None:
+                    row.update(measured, 实测DDR频率_MHz=mhz)
+            else:
+                row["实测带宽原因"] = "原始模型的实测数据仅关联第 2 个 DDR 频点"
         if sweep:
             row.update(OMC名字=Path(item["OMC相对路径"]).name, DDR频点编号=frequency_index,
                        DDR频率_MHz=mhz)
