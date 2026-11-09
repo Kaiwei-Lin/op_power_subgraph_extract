@@ -8,6 +8,7 @@
 多 DDR 频点：自动识别 N-1.csv～N-9.csv，也可增加 --ddr-sweep 强制生成九个频点行。
 后续增加 --numbering D:/results/model_stats/numbering.csv 固定编号并验证 OMC SHA256。
 通用模式需要同目录的 compiled_stats.py、stats.py、omc.py 等解析模块。
+--bandwidth-dir 递归读取经核验的 bandwidth.json，按 OMC SHA256 和 DDR 频率添加实测读写列。
 每个 OMC 按整个编译后运算图统计，输出算子数量、理论 FLOPs 和逐算子数据转移量。
 CSV 功耗读取 Channel/Power，取表头后前 12 条非空数据行，保留原值及单位。
 详细功耗识别 N_db.xlsx / N-频点db.xlsx：只读首个 sheet，所有 [W] 列按采样值求均值。
@@ -596,16 +597,76 @@ def read_detailed_power(path):
             book.close()
 
 
+def read_original_statistics(directory):
+    """读取每个编号最近一次采样的两个 AI Core 通道。"""
+    selected = {}
+    root = Path(directory).resolve()
+    if not root.is_dir():
+        raise NotADirectoryError(root)
+    for path in sorted(root.glob("*/*/statistics.csv")):
+        if not path.is_file():
+            continue
+        match = re.fullmatch(r"([1-9]\d*)/(\d{8}_\d{6}_\d{6})/statistics\.csv",
+                             path.relative_to(root).as_posix())
+        if match is None:
+            continue
+        number, timestamp = int(match[1]), match[2]
+        previous = selected.get(number)
+        if previous is not None and timestamp == previous[0]:
+            raise ValueError(f"编号 {number} 的采样时间戳 {timestamp} 重复")
+        if previous is None or timestamp > previous[0]:
+            selected[number] = (timestamp, path)
+    if not selected:
+        raise ValueError(f"未找到 编号/采样时间/statistics.csv：{directory}")
+    index = {}
+    for number, (_, path) in selected.items():
+        source = str(path.resolve())
+        # 通道名及数值字段均为 ASCII，不依赖中文合计标签的编码。
+        records = csv.DictReader(path.read_text(encoding="utf-8-sig", errors="replace").splitlines())
+        columns = {"channel", "read_bytes", "write_bytes", "read_GiBps", "write_GiBps"}
+        if not columns.issubset(records.fieldnames or []):
+            raise ValueError(f"{source}: 缺少读写数据量或带宽列")
+        channels = [row for row in records if row["channel"] in {"aicore_m0", "aicore_m1"}]
+        if len(channels) != 2 or len({row["channel"] for row in channels}) != 2:
+            raise ValueError(f"{source}: 需要各一条 aicore_m0 和 aicore_m1")
+        fields = dict(实测带宽状态="ok", 实测带宽原因="", 实测带宽文件=source,
+                      实测监测范围="NPU aicore_m0 + aicore_m1（接口计数口径）",
+                      实测每次量口径="unknown")
+        for direction, label in (("read", "读"), ("write", "写")):
+            for suffix, field in (("bytes", f"实测采样{label}字节数"),
+                                  ("GiBps", f"实测{label}带宽_GiBps")):
+                column = f"{direction}_{suffix}"
+                values = [_sample_number(row[column], f"{source}: {column}") for row in channels]
+                if any(value < 0 or (suffix == "bytes" and value != value.to_integral_value())
+                       for value in values):
+                    raise ValueError(f"{source}: {column} 需要非负值，字节数必须为整数")
+                fields[field] = int(sum(values)) if suffix == "bytes" else float(sum(values))
+        fields["实测采样总字节数"] = fields["实测采样读字节数"] + fields["实测采样写字节数"]
+        fields["实测总带宽_GiBps"] = fields["实测读带宽_GiBps"] + fields["实测写带宽_GiBps"]
+        if not math.isfinite(fields["实测总带宽_GiBps"]):
+            raise ValueError(f"{source}: 带宽超出可表示范围")
+        index[number] = fields
+    return index
+
+
 def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None, numbering_csv=None,
-                         ddr_sweep=False):
+                         ddr_sweep=False, bandwidth_dir=None, originals_dir=None):
     """动态编号、OMC 整图统计、同号/多频点功耗合并；缺失功耗保留空值及原因。"""
     if __package__:
         from .compiled_stats import analyze_compiled_subgraphs, number_models
+        from .perfstat_results import bandwidth_fields, load_bandwidth_results
     else:
         from compiled_stats import analyze_compiled_subgraphs, number_models
+        from perfstat_results import bandwidth_fields, load_bandwidth_results
     from collections import Counter, defaultdict
     root, output = Path(batch_dir).resolve(), Path(output_dir).resolve()
     powers_root = Path(power_dir).resolve() if power_dir is not None else None
+    bandwidth_root = Path(bandwidth_dir).resolve() if bandwidth_dir is not None else None
+    bandwidth_index = load_bandwidth_results(bandwidth_root)
+    originals_path = Path(originals_dir).resolve() if originals_dir is not None else None
+    if originals_path is not None and bandwidth_root is not None:
+        raise ValueError("--originals-dir 和 --bandwidth-dir 请选择其一")
+    original_stats = read_original_statistics(originals_path) if originals_path is not None else {}
     if powers_root is not None and not powers_root.is_dir():
         raise NotADirectoryError(powers_root)
     power_files = sorted(p for p in powers_root.iterdir() if p.is_file()) if powers_root is not None else []
@@ -616,10 +677,20 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
             power_index[key].append(path)
     sweep = ddr_sweep or any("-" in key for key in power_index)
     numbering = number_models(root, numbering_csv)
+    if originals_path is not None and sweep:
+        raise ValueError("--originals-dir 只支持无频点的原始模型合并")
     # Resolve and validate all deletion targets before replacing generated output.
     protected = [root, Path.cwd().resolve(), *[(root / r["OMC相对路径"]).resolve() for r in numbering]]
     if powers_root is not None:
         protected.append(powers_root)
+    if originals_path is not None:
+        protected.append(originals_path)
+        protected.extend(Path(row["实测带宽文件"]) for row in original_stats.values())
+    if bandwidth_root is not None:
+        protected.append(bandwidth_root)
+        protected.extend(p for matches in bandwidth_index.values() for p, _ in matches)
+        protected.extend(Path(r["capture_directory"]).resolve() for matches in bandwidth_index.values()
+                         for _, r in matches if isinstance(r.get("capture_directory"), str) and r["capture_directory"])
     if ge_proto_path is not None:
         protected.append(Path(ge_proto_path).resolve())
     if output == Path(output.anchor) or any(p == output or p.is_relative_to(output) for p in protected):
@@ -661,6 +732,10 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
         if row["OMC状态"] == "ok" and row["OMC_SHA256"] != item["OMC_SHA256"]:
             raise ValueError(f"统计期间 OMC 文件发生变化：{item['OMC相对路径']}")
         row.update(item)
+        row.update(bandwidth_fields(bandwidth_index, item["OMC_SHA256"], mhz))
+        if originals_path is not None:
+            row["实测带宽原因"] = "目录中没有该模型编号的 statistics.csv"
+            row.update(original_stats.get(int(item["编号"]), {}))
         if sweep:
             row.update(OMC名字=Path(item["OMC相对路径"]).name, DDR频点编号=frequency_index,
                        DDR频率_MHz=mhz)
@@ -735,7 +810,15 @@ def merge_compiled_power(batch_dir, power_dir, output_dir, *, ge_proto_path=None
         writer = csv.DictWriter(stream, fieldnames=headers, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+    bandwidth_keys = {(item["OMC_SHA256"], mhz) for item, _, _, mhz in jobs}
     result = dict(batch_dir=str(root), power_dir=str(powers_root) if powers_root is not None else None,
+                  bandwidth_dir=str(bandwidth_root) if bandwidth_root is not None else None,
+                  originals_dir=str(originals_path) if originals_path is not None else None,
+                  unused_original_numbers=sorted(set(original_stats) - {int(item["编号"]) for item in numbering}),
+                  bandwidth_counts=dict(Counter(r["实测带宽状态"] for r in rows)),
+                  unused_bandwidth_files=[str(p) for key, matches in bandwidth_index.items()
+                      if key not in bandwidth_keys
+                      for p, _ in matches],
                   source_format="OMC", numbering_rule=("复用指定编号表" if numbering_csv is not None else
                       "文件名忽略大小写全局升序，同名按相对路径升序；从 1 开始"),
                   omc_counts=compiled["counts"], power_counts=dict(Counter(r["功耗状态"] for r in rows)),
@@ -754,6 +837,10 @@ def main():
     parser.add_argument("--output-dir", type=Path, help="通用模式输出目录；存在时删除整个目录并重新生成")
     parser.add_argument("--ge-proto", type=Path, help="通用模式：DDK 的 ge_ir_pb2.py")
     parser.add_argument("--numbering", type=Path, help="通用模式：复用已生成的 numbering.csv，校验文件 SHA256")
+    parser.add_argument("--bandwidth-dir", type=Path,
+                        help="通用模式：递归读取 bandwidth.json，严格按 OMC SHA256 和 DDR MHz 关联实测读写")
+    parser.add_argument("--originals-dir", type=Path,
+                        help="原始模型模式：按编号合并解压目录内最近一次 statistics.csv")
     parser.add_argument("--ddr-sweep", action="store_true",
                         help="通用模式：为每个 OMC 生成 9 个 DDR 频点行；发现 N-频点.csv/.xlsx 或 N-频点db.xlsx 时自动启用")
     parser.add_argument("--stats-dir", type=Path, help="统计目录：stats_<数字>_slash.csv 和完整 stats.json")
@@ -766,16 +853,18 @@ def main():
         try:
             result = merge_compiled_power(args.batch_dir, args.power_dir, output,
                                           ge_proto_path=args.ge_proto, numbering_csv=args.numbering,
-                                          ddr_sweep=args.ddr_sweep)
-        except (OSError, ValueError) as error:
+                                          ddr_sweep=args.ddr_sweep, bandwidth_dir=args.bandwidth_dir,
+                                          originals_dir=args.originals_dir)
+        except (OSError, ValueError, BadZipFile) as error:
             print(f"合并失败：{error}", file=sys.stderr)
             return 1
         print(f"OMC: {result['omc_counts']}；功耗: {result['power_counts']}；时长: {result['runtime_counts']}")
+        print(f"实测带宽: {result['bandwidth_counts']}")
         print(f"编号表：{Path(output).resolve() / 'numbering.csv'}")
         print(f"总表：{Path(output).resolve() / 'summary.csv'}")
         return 0
-    if args.ddr_sweep:
-        parser.error("--ddr-sweep 仅用于 --batch-dir 模式")
+    if args.ddr_sweep or args.bandwidth_dir is not None or args.originals_dir is not None:
+        parser.error("--ddr-sweep / --bandwidth-dir / --originals-dir 仅用于 --batch-dir 模式")
     if args.power_dir is None:
         parser.error("--summary 旧模式需要 --power-dir；通用 OMC 模式使用 --batch-dir")
     try:

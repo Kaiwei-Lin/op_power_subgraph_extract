@@ -534,6 +534,16 @@ output_dir/
 
 `merge_power.py --summary ... --power-dir ... --stats-dir ...` 为历史固定编号的 56 个子图 + `0.xlsx` 整模型流程。它依赖代码中的固定 `MODEL_FILES`，不是通用动态编号模式；新模型使用 `--batch-dir`。旧模式输出单个 CSV，并拒绝覆盖已有输出文件。
 
+### 合并原始模型的实测带宽与读写量
+
+解压 `originals.zip` 后，将包含各模型编号子目录的 `originals` 文件夹传给 `--originals-dir`。
+
+```powershell
+python -m onnx_graph.merge_power --batch-dir D:/models/original_batch_omc --numbering D:/results/numbering.csv --originals-dir D:/measurements/originals --output-dir D:/results/original_summary
+```
+
+程序按 `originals/编号/采样时间/statistics.csv` 匹配编号，取该编号时间戳最新的一次采样，并合计两个 AI Core 通道的读写字节数与 GiB/s 带宽。字节数对应整个采样窗口。缺少采样的模型保留空值，`实测带宽文件` 记录选中的 statistics.csv 路径。请复用采集时的编号表；省略 `--numbering` 时仍按文件名排序编号。普通功耗目录可继续通过 `--power-dir` 一并传入，此模式与 `--bandwidth-dir`、DDR 频点模式互斥。
+
 ## 数据移动量、FLOPs 与时间的计算口径
 
 ```text
